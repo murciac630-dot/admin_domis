@@ -109,7 +109,104 @@ async function gpsView(){const data=await getAllTracking();$("#main").innerHTML=
 
 async function nominaView(){const today=new Date().toISOString().slice(0,10);$("#main").innerHTML=`<div class="page-head"><div><h1>Nómina</h1><div class="muted">Basada en turnos reales, no en inferencias de pedidos.</div></div></div><div class="card"><div class="form-grid"><div><label>Desde</label><input id="n1" type="date" value="${today}"></div><div><label>Hasta</label><input id="n2" type="date" value="${today}"></div><div style="align-self:end"><button id="ngo" class="btn primary">Calcular</button></div></div></div><div id="nresult" class="card" style="margin-top:15px"><div class="empty">Procesa un rango.</div></div>`;$("#ngo").onclick=async()=>{users=await getUsers();const rows=[];for(const u of users.filter(x=>x.rol==="domiciliario"&&x.activo!==false)){const qs=await getEntregasByDate(dateInputToDate($("#n1").value),dateInputToDate($("#n2").value,true),u.id);const turnos=[...new Set(qs.map(q=>q.turnoId).filter(Boolean))];rows.push({u,turnos:turnos.length,pedidos:qs.filter(q=>q.estado!=="anulado").length,domis:qs.filter(q=>q.estado!=="anulado").reduce((s,q)=>s+Number(q.tarifaDomicilio||0),0)})}$("#nresult").innerHTML=`<div class="table-wrap"><table class="table"><thead><tr><th>Domiciliario</th><th>Turnos</th><th>Pedidos</th><th>Base</th><th>Domicilios</th><th>Total</th></tr></thead><tbody>${rows.map(r=>{const base=r.turnos*50000;return`<tr><td>${esc(displayName(r.u))}</td><td>${r.turnos}</td><td>${r.pedidos}</td><td>${money(base)}</td><td>${money(r.domis)}</td><td><b>${money(base+r.domis)}</b></td></tr>`}).join("")}</tbody></table></div>`};}
 
-async function usuariosView(){if(profile.rol!=="admin")return;users=await getUsers();$("#main").innerHTML=`<div class="page-head"><div><h1>Usuarios</h1><div class="muted">El administrador gestiona el perfil y permisos. Las cuentas de Authentication se crean desde Firebase Console o Admin SDK.</div></div></div><div class="card"><h3 class="section-title">Perfil de usuario</h3><form id="uf" class="form-grid"><div><label>UID</label><input id="uid" required placeholder="UID de Authentication"></div><div><label>Nombre</label><input id="unombre" required></div><div><label>Correo</label><input id="uemail" type="email"></div><div><label>Rol</label><select id="urole"><option>domiciliario1</option><option>domiciliario2</option><option>supervisor</option><option>admin</option></select></div><div><label>Activo</label><select id="uactivo"><option value="true">Sí</option><option value="false">No</option></select></div><div style="align-self:end"><button class="btn green">Guardar perfil</button></div></form></div><div class="card" style="margin-top:15px"><h3 class="section-title">Perfiles registrados</h3><div class="table-wrap"><table class="table"><thead><tr><th>UID</th><th>Nombre</th><th>Email</th><th>Rol</th><th>Activo</th></tr></thead><tbody>${users.map(u=>`<tr><td>${esc(u.id)}</td><td>${esc(displayName(u))}</td><td>${esc(u.email)}</td><td><span class="badge blue">${esc(u.rol)}</span></td><td>${u.activo!==false?"Sí":"No"}</td></tr>`).join("")}</tbody></table></div></div>`;$("#uf").onsubmit=async e=>{e.preventDefault();await saveUser($("#uid").value.trim(),{nombre:$("#unombre").value.trim(),email:$("#uemail").value.trim(),rol:$("#urole").value,activo:$("#uactivo").value==="true"});toast("Perfil guardado");route("usuarios")}}
+async function usuariosView(){
+  if(profile.rol!=="admin") return;
+  users=await getUsers();
+
+  const renderRows=()=>users.map(u=>`<tr>
+    <td class="td-mono">${esc(u.id)}</td>
+    <td>${esc(displayName(u))}</td>
+    <td>${esc(u.email||"")}</td>
+    <td><span class="badge blue">${esc(u.rol||"")}</span></td>
+    <td>${u.activo!==false && u.activo!=="false" ? "Sí" : "No"}</td>
+    <td><button class="btn secondary btn-edit-user" data-uid="${esc(u.id)}">Editar</button></td>
+  </tr>`).join("");
+
+  const todayHint="Los cambios de este formulario modifican el perfil de Firestore. El correo de inicio de sesión de Firebase Authentication no se cambia desde aquí.";
+
+  const renderFormDefaults=()=>{
+    $("#uf").reset();
+    $("#uid").value="";
+    $("#uid").readOnly=false;
+    $("#uid").classList.remove("readonly");
+    $("#urole").value="domiciliario1";
+    $("#uactivo").value="true";
+    $("#uf-title").textContent="Nuevo perfil";
+    $("#btn-cancel-user").classList.add("hidden");
+    $("#uf-submit").textContent="Guardar perfil";
+    $("#user-form-note").textContent=todayHint;
+  };
+
+  const loadUser=(uid)=>{
+    const u=users.find(x=>x.id===uid);
+    if(!u) return;
+    $("#uid").value=u.id;
+    $("#uid").readOnly=true;
+    $("#uid").classList.add("readonly");
+    $("#unombre").value=displayName(u);
+    $("#uemail").value=u.email||"";
+    $("#urole").value=u.rol||"domiciliario1";
+    $("#uactivo").value=(u.activo!==false && u.activo!=="false")?"true":"false";
+    $("#uf-title").textContent=`Editar perfil · ${displayName(u)}`;
+    $("#btn-cancel-user").classList.remove("hidden");
+    $("#uf-submit").textContent="Guardar cambios";
+    $("#user-form-note").textContent=todayHint;
+    window.scrollTo({top:0,behavior:"smooth"});
+  };
+
+  $("#main").innerHTML=`
+    <div class="page-head">
+      <div><h1>Usuarios</h1><div class="muted">El administrador gestiona perfiles y permisos. Las cuentas de Authentication se crean desde Firebase Console o Admin SDK.</div></div>
+    </div>
+
+    <div class="card">
+      <h3 class="section-title" id="uf-title">Nuevo perfil</h3>
+      <form id="uf" class="form-grid">
+        <div><label>UID</label><input id="uid" required placeholder="UID de Authentication"></div>
+        <div><label>Nombre</label><input id="unombre" required placeholder="Nombre visible"></div>
+        <div><label>Correo del perfil</label><input id="uemail" type="email" placeholder="usuario@fercofarma.com"></div>
+        <div><label>Rol</label><select id="urole"><option value="domiciliario1">domiciliario1</option><option value="domiciliario2">domiciliario2</option><option value="supervisor">supervisor</option><option value="admin">admin</option></select></div>
+        <div><label>Activo</label><select id="uactivo"><option value="true">Sí</option><option value="false">No</option></select></div>
+        <div class="form-actions" style="align-self:end">
+          <button id="uf-submit" class="btn green" type="submit">Guardar perfil</button>
+          <button id="btn-cancel-user" class="btn secondary hidden" type="button">Cancelar edición</button>
+        </div>
+      </form>
+      <div id="user-form-note" class="form-note">${todayHint}</div>
+    </div>
+
+    <div class="card" style="margin-top:15px">
+      <div class="section-head-row"><h3 class="section-title">Perfiles registrados</h3><span class="muted">${users.length} perfiles</span></div>
+      <div class="table-wrap">
+        <table class="table">
+          <thead><tr><th>UID</th><th>Nombre</th><th>Email</th><th>Rol</th><th>Activo</th><th>Acción</th></tr></thead>
+          <tbody id="users-tbody">${renderRows()}</tbody>
+        </table>
+      </div>
+    </div>`;
+
+  $("#uf").onsubmit=async e=>{
+    e.preventDefault();
+    const uid=$("#uid").value.trim();
+    if(!uid) return;
+    try{
+      await saveUser(uid,{
+        nombre:$("#unombre").value.trim(),
+        email:$("#uemail").value.trim(),
+        rol:$("#urole").value,
+        activo:$("#uactivo").value==="true"
+      });
+      toast($("#btn-cancel-user").classList.contains("hidden")?"Perfil creado":"Perfil actualizado");
+      users=await getUsers();
+      $("#users-tbody").innerHTML=renderRows();
+      $("#users-tbody").querySelectorAll(".btn-edit-user").forEach(b=>b.onclick=()=>loadUser(b.dataset.uid));
+      renderFormDefaults();
+    }catch(e){toast("No se pudo guardar el perfil: "+e.message)}
+  };
+
+  $("#users-tbody").querySelectorAll(".btn-edit-user").forEach(b=>b.onclick=()=>loadUser(b.dataset.uid));
+  $("#btn-cancel-user").onclick=renderFormDefaults;
+}
 
 function formatDate(v){if(!v)return"—";try{if(v.toDate)return v.toDate().toLocaleString("es-CO");if(v.seconds)return new Date(v.seconds*1000).toLocaleString("es-CO");return new Date(v).toLocaleString("es-CO")}catch{return"—"}}
 

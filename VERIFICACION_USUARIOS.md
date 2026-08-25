@@ -26,3 +26,9 @@ nombre: opcional; si falta, la app usa la parte anterior al @ del correo
 ```
 
 No es necesario crear otra cuenta ni cambiar los UID. La aplicación vincula Authentication con Firestore mediante el UID del documento.
+
+## Edición de perfiles
+
+En la vista **Usuarios**, un administrador puede pulsar **Editar** en cualquier perfil registrado. El formulario superior se carga con los datos del documento y permite modificar nombre, correo del perfil, rol y estado activo.
+
+El UID queda bloqueado durante la edición para evitar cambiar accidentalmente la identidad del documento. El correo mostrado aquí es el correo del perfil de Firestore; cambiarlo no modifica automáticamente el correo de Firebase Authentication.

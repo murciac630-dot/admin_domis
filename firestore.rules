@@ -1,0 +1,140 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function userDoc() {
+      return get(/databases/$(database)/documents/usuarios/$(request.auth.uid));
+    }
+
+    function role() {
+      return signedIn() ? userDoc().data.get("rol", "") : "";
+    }
+
+    function isAdmin() {
+      return signedIn() && role() == "admin";
+    }
+
+    function isSupervisor() {
+      return signedIn() && (role() == "admin" || role() == "supervisor");
+    }
+
+    function isActiveUser() {
+      return signedIn() && (userDoc().data.get("activo", false) == true || userDoc().data.get("activo", false) == "true");
+    }
+
+    match /usuarios/{userId} {
+      // A user can see only their own profile.
+      // Supervisors/admins can read the team.
+      allow get: if isActiveUser() && (request.auth.uid == userId || isSupervisor());
+
+      // Collection queries must be authorized as a whole.
+      allow list: if isActiveUser() && isSupervisor();
+
+      // IMPORTANT: user profiles are not self-creatable. The first admin profile
+      // must be created manually in Firestore Console after creating the Auth user.
+      allow create: if isAdmin();
+
+      // Non-admins cannot change their own role or activate/deactivate accounts.
+      allow update: if isAdmin()
+                    || (
+                      isActiveUser()
+                      && request.auth.uid == userId
+                      && request.resource.data.rol == resource.data.rol
+                      && request.resource.data.activo == resource.data.activo
+                    );
+
+      allow delete: if isAdmin();
+    }
+
+    match /turnos/{turnoId} {
+      allow get: if isActiveUser()
+                 && (isSupervisor() || resource.data.usuarioId == request.auth.uid);
+
+      allow list: if isActiveUser() && (isSupervisor() || resource.data.usuarioId == request.auth.uid);
+
+      allow create: if isActiveUser()
+                    && request.resource.data.usuarioId == request.auth.uid
+                    && request.resource.data.estado == "activo";
+
+      allow update: if isActiveUser()
+                    && (
+                      isSupervisor()
+                      || (
+                        resource.data.usuarioId == request.auth.uid
+                        && request.resource.data.usuarioId == resource.data.usuarioId
+                        && request.resource.data.estado in ["activo", "cerrado"]
+                      )
+                    );
+
+      allow delete: if isAdmin();
+    }
+
+    match /entregas/{entregaId} {
+      // Admin/supervisor can read all. Domiciliary can read only their own.
+      allow get: if isActiveUser()
+                 && (isSupervisor() || resource.data.usuarioId == request.auth.uid);
+
+      allow list: if isActiveUser() && (isSupervisor() || resource.data.usuarioId == request.auth.uid);
+
+      // A domiciliary creates only in their own name/UID.
+      allow create: if isActiveUser()
+                    && request.resource.data.usuarioId == request.auth.uid
+                    && request.resource.data.creadoPor == request.auth.uid
+                    && request.resource.data.usuarioEmail == request.auth.token.email;
+
+      // Admin/supervisor may correct records.
+      // Domiciliary may update only their own record without changing ownership.
+      allow update: if isActiveUser()
+                    && (
+                      isSupervisor()
+                      || (
+                        resource.data.usuarioId == request.auth.uid
+                        && request.resource.data.usuarioId == resource.data.usuarioId
+                        && request.resource.data.creadoPor == resource.data.creadoPor
+                      )
+                    );
+
+      // Physical deletion is intentionally restricted.
+      allow delete: if isAdmin();
+    }
+
+    match /tracking_actual/{userId} {
+      allow get: if isActiveUser() && (request.auth.uid == userId || isSupervisor());
+      allow list: if isActiveUser() && isSupervisor();
+
+      allow create, update: if isActiveUser()
+                            && request.auth.uid == userId
+                            && request.resource.data.usuarioId == userId;
+
+      allow delete: if isAdmin();
+    }
+
+    match /tracking_historial/{documentId} {
+      allow read: if isActiveUser() && isSupervisor();
+      allow create: if isActiveUser()
+                    && request.resource.data.usuarioId == request.auth.uid;
+      allow update, delete: if isAdmin();
+    }
+
+    match /auditoria/{auditId} {
+      allow read: if isActiveUser() && isAdmin();
+      allow create: if isActiveUser() && isSupervisor();
+      allow update, delete: if isAdmin();
+    }
+
+    match /configuracion/{configId} {
+      allow read: if isActiveUser();
+      allow write: if isAdmin();
+    }
+
+    // Explicit deny for everything not modeled above.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
