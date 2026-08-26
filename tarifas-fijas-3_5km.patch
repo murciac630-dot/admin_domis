@@ -1,0 +1,326 @@
+From d02b9d82072105ee29febe4b882c32696731d1d4 Mon Sep 17 00:00:00 2001
+From: Cristian Murcia <murciac630@gmail.com>
+Date: Wed, 26 Aug 2026 03:16:31 -0500
+Subject: [PATCH] feat: use fixed delivery fee ranges
+
+---
+ firestore.rules | 20 ++++++++++++++++++--
+ js/app.js       |  9 +++++----
+ js/db.js        | 29 +++++++++++++++++++++++++++--
+ js/maps.js      | 42 ++++++++++++++++++++++++------------------
+ js/upgrades.js  | 40 ++++++++++++++++------------------------
+ sw.js           |  2 +-
+ 6 files changed, 91 insertions(+), 51 deletions(-)
+
+diff --git a/firestore.rules b/firestore.rules
+index bb9bd58..528bf5b 100644
+--- a/firestore.rules
++++ b/firestore.rules
+@@ -27,6 +27,20 @@ service cloud.firestore {
+       return signedIn() && (userDoc().data.get("activo", false) == true || userDoc().data.get("activo", false) == "true");
+     }
+ 
++    function hasValidAutomaticDeliveryFee() {
++      return request.resource.data.valorDomicilio in [10000, 15000]
++             && request.resource.data.valorDomicilioCongelado == request.resource.data.valorDomicilio
++             && request.resource.data.tarifaBase == request.resource.data.valorDomicilio
++             && request.resource.data.tipoTarifa in ["rango_10000", "rango_15000"];
++    }
++
++    function changesDeliveryFee() {
++      return request.resource.data.diff(resource.data).affectedKeys().hasAny([
++        "valorDomicilio", "valorDomicilioCongelado", "tarifaBase", "tipoTarifa",
++        "tarifaMotivo", "modificadoPor", "modificadoPorNombre", "modificadoEn"
++      ]);
++    }
++
+     match /usuarios/{userId} {
+       // A user can see only their own profile.
+       // Supervisors/admins can read the team.
+@@ -85,17 +99,19 @@ service cloud.firestore {
+       allow create: if isActiveUser()
+                     && request.resource.data.usuarioId == request.auth.uid
+                     && request.resource.data.creadoPor == request.auth.uid
+-                    && request.resource.data.usuarioEmail == request.auth.token.email;
++                    && request.resource.data.usuarioEmail == request.auth.token.email
++                    && hasValidAutomaticDeliveryFee();
+ 
+       // Admin/supervisor may correct records.
+       // Domiciliary may update only their own record without changing ownership.
+       allow update: if isActiveUser()
+                     && (
+-                      isSupervisor()
++                      (isSupervisor() && (!changesDeliveryFee() || isAdmin()))
+                       || (
+                         resource.data.usuarioId == request.auth.uid
+                         && request.resource.data.usuarioId == resource.data.usuarioId
+                         && request.resource.data.creadoPor == resource.data.creadoPor
++                        && !changesDeliveryFee()
+                       )
+                     );
+ 
+diff --git a/js/app.js b/js/app.js
+index e5279ca..bfba2d1 100644
+--- a/js/app.js
++++ b/js/app.js
+@@ -1,5 +1,5 @@
+ import { watchAuth, login, logout, resetPassword, getCurrentProfile } from "./auth.js";
+-import { createTurno, closeTurno, getActiveTurno, addEntrega, getOwnEntregas, getEntregasByDate, getTurnosByDate, getUsers, saveUser, cancelEntrega, getAllTracking, audit } from "./db.js";
++import { createTurno, closeTurno, getActiveTurno, addEntrega, getOwnEntregas, getEntregasByDate, getTurnosByDate, getUsers, saveUser, cancelEntrega, setSpecialDeliveryFee, getAllTracking, audit } from "./db.js";
+ import { startTracking, stopTracking, captureDeliveryLocation, getCurrentGps } from "./gps.js";
+ import { Timestamp } from "https://www.gstatic.com/firebasejs/12.1.0/firebase-firestore.js";
+ 
+@@ -189,8 +189,9 @@ async function entregasView() {
+   const search = async () => {
+     try {
+       const data = await getEntregasByDate(dateInputToTimestamp($("#desde").value), dateInputToTimestamp($("#hasta").value, true), $("#fuser").value || null);
+-      $("#result").innerHTML = `<h3 class="section-title">${data.length} registros</h3>${data.length ? `<div class="table-wrap"><table class="table"><thead><tr><th>Fecha</th><th>Domi</th><th>Cliente</th><th>Empresa</th><th>Total</th><th>GPS</th><th>Estado</th><th>Acción</th></tr></thead><tbody>${data.map(p => `<tr><td>${esc(formatDate(p.timestamp))}</td><td>${esc(p.usuarioNombre)}</td><td>${esc(p.cliente)}</td><td>${esc(p.empresa)}</td><td>${money(p.pago?.total || p.valorPagado || 0)}</td><td>${p.lat != null && p.lng != null ? `<span class="badge green">${Number(p.lat).toFixed(4)}, ${Number(p.lng).toFixed(4)}</span>` : `<span class="badge red">Sin GPS</span>`}</td><td><span class="badge ${p.estado === "anulado" ? "red" : "green"}">${esc(p.estado)}</span></td><td>${p.estado !== "anulado" ? `<button class="btn red cancel" data-id="${p.id}">Anular</button>` : "—"}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty">Sin resultados.</div>`}`;
++      $("#result").innerHTML = `<h3 class="section-title">${data.length} registros</h3>${data.length ? `<div class="table-wrap"><table class="table"><thead><tr><th>Fecha</th><th>Domi</th><th>Cliente</th><th>Empresa</th><th>Total</th><th>Tarifa</th><th>GPS</th><th>Estado</th><th>Acción</th></tr></thead><tbody>${data.map(p => `<tr><td>${esc(formatDate(p.timestamp))}</td><td>${esc(p.usuarioNombre)}</td><td>${esc(p.cliente)}</td><td>${esc(p.empresa)}</td><td>${money(p.pago?.total || p.valorPagado || 0)}</td><td>${money(p.valorDomicilio)}<br><small class="muted">${esc(p.tipoTarifa === "especial" ? "Especial" : p.tarifaMotivo || "Pendiente")}</small></td><td>${p.lat != null && p.lng != null ? `<span class="badge green">${Number(p.lat).toFixed(4)}, ${Number(p.lng).toFixed(4)}</span>` : `<span class="badge red">Sin GPS</span>`}</td><td><span class="badge ${p.estado === "anulado" ? "red" : "green"}">${esc(p.estado)}</span></td><td>${p.estado !== "anulado" ? `${profile.rol === "admin" ? `<button class="btn secondary special-fee" data-id="${p.id}" data-value="${Number(p.valorDomicilio || 0)}">Valor especial</button> ` : ""}<button class="btn red cancel" data-id="${p.id}">Anular</button>` : "—"}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty">Sin resultados.</div>`}`;
+       $("#result").querySelectorAll(".cancel").forEach(b => b.onclick = async () => { const motivo = prompt("Motivo de anulación:"); if (!motivo) return; await cancelEntrega(b.dataset.id, motivo, profile); await audit({ accion: "anular_entrega", registroId: b.dataset.id, usuarioId: profile.uid, usuarioNombre: displayName(profile), motivo }); toast("Registro anulado"); await search(); });
++      $("#result").querySelectorAll(".special-fee").forEach(b => b.onclick = async () => { const valor = prompt("Valor especial (debe ser mayor a $15.000):", b.dataset.value); if (valor == null) return; const motivo = prompt("Motivo del valor especial:"); if (!motivo) return; try { await setSpecialDeliveryFee(b.dataset.id, valor, motivo, profile); toast("Valor especial registrado y auditado"); await search(); } catch (e) { toast(e.message); } });
+     } catch (e) { $("#result").innerHTML = `<div class="error">${esc(e.message)}</div>`; }
+   };
+   $("#buscar").onclick = search; await search();
+@@ -213,7 +214,7 @@ async function gpsView() {
+ 
+ async function nominaView() {
+   const d = today();
+-  $("#main").innerHTML = `<div class="page-head"><div><h1>Nómina</h1><div class="muted">Turnos reales + domicilios registrados.</div></div></div><div class="card"><div class="form-grid"><div><label>Desde</label><input id="n1" type="date" value="${d}"></div><div><label>Hasta</label><input id="n2" type="date" value="${d}"></div><div style="align-self:end"><button id="ngo" class="btn primary">Calcular</button></div></div><p class="form-note">Base de turno configurada: $50.000. El valor de cada domicilio debe quedar en <b>valorDomicilio</b> o en la tarifa configurada; no se infiere de forma insegura desde la interfaz.</p></div><div id="nresult" class="card" style="margin-top:15px"><div class="empty">Procesa un rango.</div></div>`;
++  $("#main").innerHTML = `<div class="page-head"><div><h1>Nómina</h1><div class="muted">Turnos reales + domicilios registrados.</div></div></div><div class="card"><div class="form-grid"><div><label>Desde</label><input id="n1" type="date" value="${d}"></div><div><label>Hasta</label><input id="n2" type="date" value="${d}"></div><div style="align-self:end"><button id="ngo" class="btn primary">Calcular</button></div></div><p class="form-note">Base de turno: $50.000. Nómina suma el <b>valorDomicilioCongelado</b> de cada entrega (incluyendo los valores especiales autorizados).</p></div><div id="nresult" class="card" style="margin-top:15px"><div class="empty">Procesa un rango.</div></div>`;
+   $("#ngo").onclick = async () => {
+     try {
+       users = await getUsers();
+@@ -224,7 +225,7 @@ async function nominaView() {
+         const deliveries = await getEntregasByDate(dateInputToTimestamp(start), dateInputToTimestamp(end, true), u.id);
+         const valid = deliveries.filter(x => x.estado !== "anulado");
+         const shifts = turns.filter(x => x.usuarioId === u.id).length;
+-        const domicilios = valid.reduce((sum, x) => sum + Number(x.valorDomicilio || x.pago?.valorDomicilio || 0), 0);
++        const domicilios = valid.reduce((sum, x) => sum + Number(x.valorDomicilioCongelado ?? x.valorDomicilio ?? 0), 0);
+         rows.push({ name: displayName(u), shifts, deliveries: valid.length, base: shifts * 50000, domicilios, total: shifts * 50000 + domicilios });
+       }
+       $("#nresult").innerHTML = `<h3 class="section-title">Liquidación</h3><div class="table-wrap"><table class="table"><thead><tr><th>Domiciliario</th><th>Turnos</th><th>Domicilios</th><th>Base</th><th>Pago domicilios</th><th>Total</th></tr></thead><tbody>${rows.map(r => `<tr><td>${esc(r.name)}</td><td>${r.shifts}</td><td>${r.deliveries}</td><td>${money(r.base)}</td><td>${money(r.domicilios)}</td><td><b>${money(r.total)}</b></td></tr>`).join("")}</tbody></table></div>`;
+diff --git a/js/db.js b/js/db.js
+index 5574ebf..17ad749 100644
+--- a/js/db.js
++++ b/js/db.js
+@@ -1,6 +1,6 @@
+ import { db } from "./firebase.js";
+-import { calculateDeliveryPricing } from "./maps.js";
+-import { addDoc, collection, doc, getDoc, getDocs, limit, orderBy, query, serverTimestamp, setDoc, updateDoc, where } from "https://www.gstatic.com/firebasejs/12.1.0/firebase-firestore.js";
++import { calculateDeliveryPricing, getOperationConfig } from "./maps.js";
++import { addDoc, collection, doc, getDoc, getDocs, limit, orderBy, query, serverTimestamp, setDoc, updateDoc, where, writeBatch } from "https://www.gstatic.com/firebasejs/12.1.0/firebase-firestore.js";
+ 
+ export const col = name => collection(db, name);
+ 
+@@ -97,6 +97,31 @@ export async function updateEntrega(id, data) {
+   return updateDoc(doc(db, "entregas", id), { ...data, actualizadoEn: serverTimestamp() });
+ }
+ 
++export async function setSpecialDeliveryFee(id, valorEspecial, motivo, user) {
++  const valor = Number(valorEspecial);
++  const cleanMotivo = String(motivo || "").trim();
++  if (!Number.isFinite(valor) || valor <= 15000) throw new Error("El valor especial debe ser superior a $15.000.");
++  if (!cleanMotivo) throw new Error("El motivo del valor especial es obligatorio.");
++  const operationConfig = await getOperationConfig();
++  if (operationConfig.tarifa?.permiteEspecial === false) throw new Error("Los valores especiales están desactivados en Configuración.");
++  const entregaRef = doc(db, "entregas", id);
++  const entrega = await getDoc(entregaRef);
++  if (!entrega.exists()) throw new Error("La entrega ya no existe.");
++  const batch = writeBatch(db);
++  batch.update(entregaRef, {
++    valorDomicilio: Math.round(valor), valorDomicilioCongelado: Math.round(valor), tipoTarifa: "especial",
++    tarifaBase: Number(entrega.data().tarifaBase || entrega.data().valorDomicilio || 15000),
++    tarifaMotivo: cleanMotivo, modificadoPor: user.uid, modificadoPorNombre: user.nombre || user.email || user.uid,
++    modificadoEn: serverTimestamp(), actualizadoEn: serverTimestamp()
++  });
++  batch.set(doc(col("auditoria")), {
++    accion: "asignar_valor_especial_domicilio", registroId: id, usuarioId: user.uid,
++    usuarioNombre: user.nombre || user.email || user.uid, valorAnterior: Number(entrega.data().valorDomicilio || 0),
++    valorNuevo: Math.round(valor), motivo: cleanMotivo, fecha: serverTimestamp()
++  });
++  await batch.commit();
++}
++
+ export async function cancelEntrega(id, motivo, user) {
+   return updateDoc(doc(db, "entregas", id), {
+     estado: "anulado",
+diff --git a/js/maps.js b/js/maps.js
+index 22491ba..b161cd6 100644
+--- a/js/maps.js
++++ b/js/maps.js
+@@ -1,15 +1,14 @@
+ import { db } from "./firebase.js";
+-import { doc, getDoc, setDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/12.1.0/firebase-firestore.js";
++import { deleteField, doc, getDoc, setDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/12.1.0/firebase-firestore.js";
+ 
+ export const DEFAULT_OPERATION_CONFIG = {
+   mapCenter: { lat: 3.4516, lng: -76.5320 },
+   tarifa: {
+-    activa: false,
+-    base: 0,
+-    porKm: 0,
+-    minima: 0,
+-    maxima: 0,
+-    redondeo: 500
++    activa: true,
++    limiteKm: 3.5,
++    hastaLimite: 10000,
++    sobreLimite: 15000,
++    permiteEspecial: true
+   },
+   version: 1
+ };
+@@ -36,11 +35,12 @@ export async function saveOperationConfig(config, user) {
+     mapCenter: { lat: num(config.mapCenter?.lat), lng: num(config.mapCenter?.lng) },
+     tarifa: {
+       activa: Boolean(config.tarifa?.activa),
+-      base: Math.max(0, num(config.tarifa?.base)),
+-      porKm: Math.max(0, num(config.tarifa?.porKm)),
+-      minima: Math.max(0, num(config.tarifa?.minima)),
+-      maxima: Math.max(0, num(config.tarifa?.maxima)),
+-      redondeo: Math.max(1, num(config.tarifa?.redondeo, 500))
++      limiteKm: Math.max(0, num(config.tarifa?.limiteKm, 3.5)),
++      hastaLimite: 10000,
++      sobreLimite: 15000,
++      permiteEspecial: config.tarifa?.permiteEspecial !== false,
++      // Retira claves del esquema proporcional que pudiera conservar un documento legado.
++      base: deleteField(), porKm: deleteField(), minima: deleteField(), maxima: deleteField(), redondeo: deleteField()
+     },
+     version: num(config.version, 1),
+     actualizadoPor: user?.uid || null,
+@@ -64,15 +64,18 @@ export function haversineKm(a, b) {
+ }
+ 
+ export function calculateDeliveryFee(distanceKm, tarifa) {
++  if (!Number.isFinite(Number(distanceKm))) return { valor: 0, calculada: false, motivo: "Distancia no disponible" };
+   const distance = Math.max(0, num(distanceKm));
+   const t = { ...DEFAULT_OPERATION_CONFIG.tarifa, ...(tarifa || {}) };
+   if (!t.activa) return { valor: 0, calculada: false, motivo: "Tarifa no activada" };
+-  let value = num(t.base) + distance * num(t.porKm);
+-  if (num(t.minima) > 0) value = Math.max(value, num(t.minima));
+-  if (num(t.maxima) > 0) value = Math.min(value, num(t.maxima));
+-  const rounding = Math.max(1, num(t.redondeo, 500));
+-  value = Math.round(value / rounding) * rounding;
+-  return { valor: Math.max(0, Math.round(value)), calculada: true, motivo: "Tarifa por distancia" };
++  const limit = Math.max(0, num(t.limiteKm, 3.5));
++  const withinLimit = distance <= limit;
++  return {
++    valor: withinLimit ? 10000 : 15000,
++    calculada: true,
++    motivo: withinLimit ? `Hasta ${limit} km` : `Más de ${limit} km`,
++    tipo: withinLimit ? "rango_10000" : "rango_15000"
++  };
+ }
+ 
+ export async function calculateDeliveryPricing(location) {
+@@ -84,6 +87,9 @@ export async function calculateDeliveryPricing(location) {
+     valorDomicilio: fee.valor,
+     tarifaCalculada: fee.calculada,
+     tarifaMotivo: fee.motivo,
++    tipoTarifa: fee.tipo || "pendiente",
++    tarifaBase: fee.valor,
++    valorDomicilioCongelado: fee.valor,
+     tarifaVersion: config.version || 1,
+     origenTarifa: config.mapCenter,
+     tarifa: config.tarifa
+diff --git a/js/upgrades.js b/js/upgrades.js
+index 1547a12..8f44929 100644
+--- a/js/upgrades.js
++++ b/js/upgrades.js
+@@ -5,6 +5,7 @@ import { auth } from "./firebase.js";
+ 
+ let mapInstance = null;
+ let previewTimer = null;
++let loadedConfig = null;
+ 
+ const $ = selector => document.querySelector(selector);
+ 
+@@ -48,26 +49,23 @@ async function renderConfigPage() {
+   main.innerHTML = `<div class="page-head"><div><h1>Configuración</h1><div class="muted">Origen de operación y tarifa automática de domicilios</div></div></div>
+     <div class="card"><div class="section-head-row"><div><h3 class="section-title">Punto de origen</h3><p class="muted">La distancia tarifable se calcula desde este punto hasta la ubicación capturada en la entrega.</p></div><button class="btn secondary" id="use-my-location">Usar mi ubicación</button></div>
+       <div class="form-grid"><div><label>Latitud de origen</label><input id="cfg-lat" type="number" step="any"></div><div><label>Longitud de origen</label><input id="cfg-lng" type="number" step="any"></div></div></div>
+-    <div class="card" style="margin-top:15px"><h3 class="section-title">Tarifa por distancia</h3><div class="form-grid">
++    <div class="card" style="margin-top:15px"><h3 class="section-title">Tarifas fijas por distancia</h3><div class="form-grid">
+       <div><label>Activar cálculo automático</label><select id="cfg-active"><option value="false">No</option><option value="true">Sí</option></select></div>
+-      <div><label>Base por domicilio</label><input id="cfg-base" type="number" min="0" step="500"></div>
+-      <div><label>Valor por km</label><input id="cfg-km" type="number" min="0" step="100"></div>
+-      <div><label>Tarifa mínima</label><input id="cfg-min" type="number" min="0" step="500"></div>
+-      <div><label>Tarifa máxima</label><input id="cfg-max" type="number" min="0" step="500"></div>
+-      <div><label>Redondeo</label><select id="cfg-round"><option value="100">$100</option><option value="500">$500</option><option value="1000">$1.000</option></select></div>
+-    </div><p class="form-note">No he impuesto una tarifa empresarial arbitraria. Los valores quedan bajo control del administrador y se guardan como configuración operativa.</p></div>
++      <div><label>Hasta (km)</label><input id="cfg-limit" type="number" min="0" step="0.1" value="3.5"></div>
++      <div><label>Hasta el límite</label><input class="readonly" readonly value="$10.000"></div>
++      <div><label>Más del límite</label><input class="readonly" readonly value="$15.000"></div>
++      <div><label>Permitir valor especial</label><select id="cfg-special"><option value="true">Sí, solo administrador</option><option value="false">No</option></select></div>
++    </div><p class="form-note">Regla operativa: hasta 3,5 km se liquidan $10.000; por encima, $15.000. Un administrador puede asignar por entrega un valor especial superior a $15.000, con motivo y auditoría.</p></div>
+     <div class="card" style="margin-top:15px"><div class="section-head-row"><div><h3 class="section-title">Prueba de cálculo</h3><div id="cfg-preview" class="muted">Configura el origen y una tarifa para ver una simulación.</div></div><button class="btn green" id="save-config">Guardar configuración</button></div></div>`;
+ 
+   try {
+     const config = await getOperationConfig();
++    loadedConfig = config;
+     $("#cfg-lat").value = config.mapCenter.lat;
+     $("#cfg-lng").value = config.mapCenter.lng;
+     $("#cfg-active").value = String(Boolean(config.tarifa.activa));
+-    $("#cfg-base").value = config.tarifa.base;
+-    $("#cfg-km").value = config.tarifa.porKm;
+-    $("#cfg-min").value = config.tarifa.minima;
+-    $("#cfg-max").value = config.tarifa.maxima;
+-    $("#cfg-round").value = String(config.tarifa.redondeo || 500);
++    $("#cfg-limit").value = config.tarifa.limiteKm;
++    $("#cfg-special").value = String(config.tarifa.permiteEspecial !== false);
+     await updateConfigPreview();
+   } catch (error) { $("#cfg-preview").textContent = error.message; }
+ 
+@@ -81,7 +79,7 @@ async function renderConfigPage() {
+     } catch (error) { alert(error.message || "No fue posible obtener la ubicación."); }
+   };
+ 
+-  ["cfg-lat", "cfg-lng", "cfg-active", "cfg-base", "cfg-km", "cfg-min", "cfg-max", "cfg-round"].forEach(id => $("#" + id).addEventListener("input", updateConfigPreview));
++  ["cfg-lat", "cfg-lng", "cfg-active", "cfg-limit", "cfg-special"].forEach(id => $("#" + id).addEventListener("input", updateConfigPreview));
+   $("#save-config").onclick = async () => {
+     const button = $("#save-config"); button.disabled = true; button.textContent = "Guardando…";
+     try {
+@@ -89,13 +87,10 @@ async function renderConfigPage() {
+         mapCenter: { lat: $("#cfg-lat").value, lng: $("#cfg-lng").value },
+         tarifa: {
+           activa: $("#cfg-active").value === "true",
+-          base: $("#cfg-base").value,
+-          porKm: $("#cfg-km").value,
+-          minima: $("#cfg-min").value,
+-          maxima: $("#cfg-max").value,
+-          redondeo: $("#cfg-round").value
++          limiteKm: $("#cfg-limit").value,
++          permiteEspecial: $("#cfg-special").value === "true"
+         },
+-        version: 1
++        version: Number(loadedConfig?.version || 0) + 1
+       }, auth.currentUser);
+       button.textContent = "Guardado";
+       setTimeout(() => { button.disabled = false; button.textContent = "Guardar configuración"; }, 1200);
+@@ -116,11 +111,8 @@ async function updateConfigPreview() {
+     mapCenter: { lat: $("#cfg-lat").value, lng: $("#cfg-lng").value },
+     tarifa: {
+       activa: $("#cfg-active").value === "true",
+-      base: $("#cfg-base").value,
+-      porKm: $("#cfg-km").value,
+-      minima: $("#cfg-min").value,
+-      maxima: $("#cfg-max").value,
+-      redondeo: $("#cfg-round").value
++      limiteKm: $("#cfg-limit").value,
++      permiteEspecial: $("#cfg-special").value === "true"
+     }
+   };
+   const distanceKm = await import("./maps.js").then(m => m.haversineKm(config.mapCenter, gps));
+diff --git a/sw.js b/sw.js
+index 606e2f8..8a4150f 100644
+--- a/sw.js
++++ b/sw.js
+@@ -1,4 +1,4 @@
+-const CACHE = "ferco-domis-shell-v22";
++const CACHE = "ferco-domis-shell-v23";
+ const SHELL = [
+   "./",
+   "./index.html",
+-- 
+2.53.0.windows.2
+
