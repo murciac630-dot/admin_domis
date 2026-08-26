@@ -1,0 +1,10 @@
+{
+  "name": "Ferco Farma · Operación",
+  "short_name": "Ferco Farma",
+  "lang": "es-CO",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#07101c",
+  "theme_color": "#08111f",
+  "description": "Sistema unificado de operación para domiciliarios y administración."
+}
