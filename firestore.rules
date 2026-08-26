@@ -27,6 +27,20 @@ service cloud.firestore {
       return signedIn() && (userDoc().data.get("activo", false) == true || userDoc().data.get("activo", false) == "true");
     }
 
+    function hasValidAutomaticDeliveryFee() {
+      return request.resource.data.valorDomicilio in [10000, 15000]
+             && request.resource.data.valorDomicilioCongelado == request.resource.data.valorDomicilio
+             && request.resource.data.tarifaBase == request.resource.data.valorDomicilio
+             && request.resource.data.tipoTarifa in ["rango_10000", "rango_15000"];
+    }
+
+    function changesDeliveryFee() {
+      return request.resource.data.diff(resource.data).affectedKeys().hasAny([
+        "valorDomicilio", "valorDomicilioCongelado", "tarifaBase", "tipoTarifa",
+        "tarifaMotivo", "modificadoPor", "modificadoPorNombre", "modificadoEn"
+      ]);
+    }
+
     match /usuarios/{userId} {
       // A user can see only their own profile.
       // Supervisors/admins can read the team.
@@ -85,17 +99,19 @@ service cloud.firestore {
       allow create: if isActiveUser()
                     && request.resource.data.usuarioId == request.auth.uid
                     && request.resource.data.creadoPor == request.auth.uid
-                    && request.resource.data.usuarioEmail == request.auth.token.email;
+                    && request.resource.data.usuarioEmail == request.auth.token.email
+                    && hasValidAutomaticDeliveryFee();
 
       // Admin/supervisor may correct records.
       // Domiciliary may update only their own record without changing ownership.
       allow update: if isActiveUser()
                     && (
-                      isSupervisor()
+                      (isSupervisor() && (!changesDeliveryFee() || isAdmin()))
                       || (
                         resource.data.usuarioId == request.auth.uid
                         && request.resource.data.usuarioId == resource.data.usuarioId
                         && request.resource.data.creadoPor == resource.data.creadoPor
+                        && !changesDeliveryFee()
                       )
                     );
 

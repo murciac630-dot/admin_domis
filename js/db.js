@@ -1,6 +1,6 @@
 import { db } from "./firebase.js";
-import { calculateDeliveryPricing } from "./maps.js";
-import { addDoc, collection, doc, getDoc, getDocs, limit, orderBy, query, serverTimestamp, setDoc, updateDoc, where } from "https://www.gstatic.com/firebasejs/12.1.0/firebase-firestore.js";
+import { calculateDeliveryPricing, getOperationConfig } from "./maps.js";
+import { addDoc, collection, doc, getDoc, getDocs, limit, orderBy, query, serverTimestamp, setDoc, updateDoc, where, writeBatch } from "https://www.gstatic.com/firebasejs/12.1.0/firebase-firestore.js";
 
 export const col = name => collection(db, name);
 
@@ -95,6 +95,31 @@ export async function getEntregasByDate(start, end, uid = null) {
 
 export async function updateEntrega(id, data) {
   return updateDoc(doc(db, "entregas", id), { ...data, actualizadoEn: serverTimestamp() });
+}
+
+export async function setSpecialDeliveryFee(id, valorEspecial, motivo, user) {
+  const valor = Number(valorEspecial);
+  const cleanMotivo = String(motivo || "").trim();
+  if (!Number.isFinite(valor) || valor <= 15000) throw new Error("El valor especial debe ser superior a $15.000.");
+  if (!cleanMotivo) throw new Error("El motivo del valor especial es obligatorio.");
+  const operationConfig = await getOperationConfig();
+  if (operationConfig.tarifa?.permiteEspecial === false) throw new Error("Los valores especiales están desactivados en Configuración.");
+  const entregaRef = doc(db, "entregas", id);
+  const entrega = await getDoc(entregaRef);
+  if (!entrega.exists()) throw new Error("La entrega ya no existe.");
+  const batch = writeBatch(db);
+  batch.update(entregaRef, {
+    valorDomicilio: Math.round(valor), valorDomicilioCongelado: Math.round(valor), tipoTarifa: "especial",
+    tarifaBase: Number(entrega.data().tarifaBase || entrega.data().valorDomicilio || 15000),
+    tarifaMotivo: cleanMotivo, modificadoPor: user.uid, modificadoPorNombre: user.nombre || user.email || user.uid,
+    modificadoEn: serverTimestamp(), actualizadoEn: serverTimestamp()
+  });
+  batch.set(doc(col("auditoria")), {
+    accion: "asignar_valor_especial_domicilio", registroId: id, usuarioId: user.uid,
+    usuarioNombre: user.nombre || user.email || user.uid, valorAnterior: Number(entrega.data().valorDomicilio || 0),
+    valorNuevo: Math.round(valor), motivo: cleanMotivo, fecha: serverTimestamp()
+  });
+  await batch.commit();
 }
 
 export async function cancelEntrega(id, motivo, user) {

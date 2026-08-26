@@ -5,6 +5,7 @@ import { auth } from "./firebase.js";
 
 let mapInstance = null;
 let previewTimer = null;
+let loadedConfig = null;
 
 const $ = selector => document.querySelector(selector);
 
@@ -48,26 +49,23 @@ async function renderConfigPage() {
   main.innerHTML = `<div class="page-head"><div><h1>Configuración</h1><div class="muted">Origen de operación y tarifa automática de domicilios</div></div></div>
     <div class="card"><div class="section-head-row"><div><h3 class="section-title">Punto de origen</h3><p class="muted">La distancia tarifable se calcula desde este punto hasta la ubicación capturada en la entrega.</p></div><button class="btn secondary" id="use-my-location">Usar mi ubicación</button></div>
       <div class="form-grid"><div><label>Latitud de origen</label><input id="cfg-lat" type="number" step="any"></div><div><label>Longitud de origen</label><input id="cfg-lng" type="number" step="any"></div></div></div>
-    <div class="card" style="margin-top:15px"><h3 class="section-title">Tarifa por distancia</h3><div class="form-grid">
+    <div class="card" style="margin-top:15px"><h3 class="section-title">Tarifas fijas por distancia</h3><div class="form-grid">
       <div><label>Activar cálculo automático</label><select id="cfg-active"><option value="false">No</option><option value="true">Sí</option></select></div>
-      <div><label>Base por domicilio</label><input id="cfg-base" type="number" min="0" step="500"></div>
-      <div><label>Valor por km</label><input id="cfg-km" type="number" min="0" step="100"></div>
-      <div><label>Tarifa mínima</label><input id="cfg-min" type="number" min="0" step="500"></div>
-      <div><label>Tarifa máxima</label><input id="cfg-max" type="number" min="0" step="500"></div>
-      <div><label>Redondeo</label><select id="cfg-round"><option value="100">$100</option><option value="500">$500</option><option value="1000">$1.000</option></select></div>
-    </div><p class="form-note">No he impuesto una tarifa empresarial arbitraria. Los valores quedan bajo control del administrador y se guardan como configuración operativa.</p></div>
+      <div><label>Hasta (km)</label><input id="cfg-limit" type="number" min="0" step="0.1" value="3.5"></div>
+      <div><label>Hasta el límite</label><input class="readonly" readonly value="$10.000"></div>
+      <div><label>Más del límite</label><input class="readonly" readonly value="$15.000"></div>
+      <div><label>Permitir valor especial</label><select id="cfg-special"><option value="true">Sí, solo administrador</option><option value="false">No</option></select></div>
+    </div><p class="form-note">Regla operativa: hasta 3,5 km se liquidan $10.000; por encima, $15.000. Un administrador puede asignar por entrega un valor especial superior a $15.000, con motivo y auditoría.</p></div>
     <div class="card" style="margin-top:15px"><div class="section-head-row"><div><h3 class="section-title">Prueba de cálculo</h3><div id="cfg-preview" class="muted">Configura el origen y una tarifa para ver una simulación.</div></div><button class="btn green" id="save-config">Guardar configuración</button></div></div>`;
 
   try {
     const config = await getOperationConfig();
+    loadedConfig = config;
     $("#cfg-lat").value = config.mapCenter.lat;
     $("#cfg-lng").value = config.mapCenter.lng;
     $("#cfg-active").value = String(Boolean(config.tarifa.activa));
-    $("#cfg-base").value = config.tarifa.base;
-    $("#cfg-km").value = config.tarifa.porKm;
-    $("#cfg-min").value = config.tarifa.minima;
-    $("#cfg-max").value = config.tarifa.maxima;
-    $("#cfg-round").value = String(config.tarifa.redondeo || 500);
+    $("#cfg-limit").value = config.tarifa.limiteKm;
+    $("#cfg-special").value = String(config.tarifa.permiteEspecial !== false);
     await updateConfigPreview();
   } catch (error) { $("#cfg-preview").textContent = error.message; }
 
@@ -81,7 +79,7 @@ async function renderConfigPage() {
     } catch (error) { alert(error.message || "No fue posible obtener la ubicación."); }
   };
 
-  ["cfg-lat", "cfg-lng", "cfg-active", "cfg-base", "cfg-km", "cfg-min", "cfg-max", "cfg-round"].forEach(id => $("#" + id).addEventListener("input", updateConfigPreview));
+  ["cfg-lat", "cfg-lng", "cfg-active", "cfg-limit", "cfg-special"].forEach(id => $("#" + id).addEventListener("input", updateConfigPreview));
   $("#save-config").onclick = async () => {
     const button = $("#save-config"); button.disabled = true; button.textContent = "Guardando…";
     try {
@@ -89,13 +87,10 @@ async function renderConfigPage() {
         mapCenter: { lat: $("#cfg-lat").value, lng: $("#cfg-lng").value },
         tarifa: {
           activa: $("#cfg-active").value === "true",
-          base: $("#cfg-base").value,
-          porKm: $("#cfg-km").value,
-          minima: $("#cfg-min").value,
-          maxima: $("#cfg-max").value,
-          redondeo: $("#cfg-round").value
+          limiteKm: $("#cfg-limit").value,
+          permiteEspecial: $("#cfg-special").value === "true"
         },
-        version: 1
+        version: Number(loadedConfig?.version || 0) + 1
       }, auth.currentUser);
       button.textContent = "Guardado";
       setTimeout(() => { button.disabled = false; button.textContent = "Guardar configuración"; }, 1200);
@@ -116,11 +111,8 @@ async function updateConfigPreview() {
     mapCenter: { lat: $("#cfg-lat").value, lng: $("#cfg-lng").value },
     tarifa: {
       activa: $("#cfg-active").value === "true",
-      base: $("#cfg-base").value,
-      porKm: $("#cfg-km").value,
-      minima: $("#cfg-min").value,
-      maxima: $("#cfg-max").value,
-      redondeo: $("#cfg-round").value
+      limiteKm: $("#cfg-limit").value,
+      permiteEspecial: $("#cfg-special").value === "true"
     }
   };
   const distanceKm = await import("./maps.js").then(m => m.haversineKm(config.mapCenter, gps));

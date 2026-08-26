@@ -1,15 +1,14 @@
 import { db } from "./firebase.js";
-import { doc, getDoc, setDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/12.1.0/firebase-firestore.js";
+import { deleteField, doc, getDoc, setDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/12.1.0/firebase-firestore.js";
 
 export const DEFAULT_OPERATION_CONFIG = {
   mapCenter: { lat: 3.4516, lng: -76.5320 },
   tarifa: {
-    activa: false,
-    base: 0,
-    porKm: 0,
-    minima: 0,
-    maxima: 0,
-    redondeo: 500
+    activa: true,
+    limiteKm: 3.5,
+    hastaLimite: 10000,
+    sobreLimite: 15000,
+    permiteEspecial: true
   },
   version: 1
 };
@@ -36,11 +35,12 @@ export async function saveOperationConfig(config, user) {
     mapCenter: { lat: num(config.mapCenter?.lat), lng: num(config.mapCenter?.lng) },
     tarifa: {
       activa: Boolean(config.tarifa?.activa),
-      base: Math.max(0, num(config.tarifa?.base)),
-      porKm: Math.max(0, num(config.tarifa?.porKm)),
-      minima: Math.max(0, num(config.tarifa?.minima)),
-      maxima: Math.max(0, num(config.tarifa?.maxima)),
-      redondeo: Math.max(1, num(config.tarifa?.redondeo, 500))
+      limiteKm: Math.max(0, num(config.tarifa?.limiteKm, 3.5)),
+      hastaLimite: 10000,
+      sobreLimite: 15000,
+      permiteEspecial: config.tarifa?.permiteEspecial !== false,
+      // Retira claves del esquema proporcional que pudiera conservar un documento legado.
+      base: deleteField(), porKm: deleteField(), minima: deleteField(), maxima: deleteField(), redondeo: deleteField()
     },
     version: num(config.version, 1),
     actualizadoPor: user?.uid || null,
@@ -64,15 +64,18 @@ export function haversineKm(a, b) {
 }
 
 export function calculateDeliveryFee(distanceKm, tarifa) {
+  if (!Number.isFinite(Number(distanceKm))) return { valor: 0, calculada: false, motivo: "Distancia no disponible" };
   const distance = Math.max(0, num(distanceKm));
   const t = { ...DEFAULT_OPERATION_CONFIG.tarifa, ...(tarifa || {}) };
   if (!t.activa) return { valor: 0, calculada: false, motivo: "Tarifa no activada" };
-  let value = num(t.base) + distance * num(t.porKm);
-  if (num(t.minima) > 0) value = Math.max(value, num(t.minima));
-  if (num(t.maxima) > 0) value = Math.min(value, num(t.maxima));
-  const rounding = Math.max(1, num(t.redondeo, 500));
-  value = Math.round(value / rounding) * rounding;
-  return { valor: Math.max(0, Math.round(value)), calculada: true, motivo: "Tarifa por distancia" };
+  const limit = Math.max(0, num(t.limiteKm, 3.5));
+  const withinLimit = distance <= limit;
+  return {
+    valor: withinLimit ? 10000 : 15000,
+    calculada: true,
+    motivo: withinLimit ? `Hasta ${limit} km` : `Más de ${limit} km`,
+    tipo: withinLimit ? "rango_10000" : "rango_15000"
+  };
 }
 
 export async function calculateDeliveryPricing(location) {
@@ -84,6 +87,9 @@ export async function calculateDeliveryPricing(location) {
     valorDomicilio: fee.valor,
     tarifaCalculada: fee.calculada,
     tarifaMotivo: fee.motivo,
+    tipoTarifa: fee.tipo || "pendiente",
+    tarifaBase: fee.valor,
+    valorDomicilioCongelado: fee.valor,
     tarifaVersion: config.version || 1,
     origenTarifa: config.mapCenter,
     tarifa: config.tarifa

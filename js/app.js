@@ -1,5 +1,5 @@
 import { watchAuth, login, logout, resetPassword, getCurrentProfile } from "./auth.js";
-import { createTurno, closeTurno, getActiveTurno, addEntrega, getOwnEntregas, getEntregasByDate, getTurnosByDate, getUsers, saveUser, cancelEntrega, getAllTracking, audit } from "./db.js";
+import { createTurno, closeTurno, getActiveTurno, addEntrega, getOwnEntregas, getEntregasByDate, getTurnosByDate, getUsers, saveUser, cancelEntrega, setSpecialDeliveryFee, getAllTracking, audit } from "./db.js";
 import { startTracking, stopTracking, captureDeliveryLocation, getCurrentGps } from "./gps.js";
 import { Timestamp } from "https://www.gstatic.com/firebasejs/12.1.0/firebase-firestore.js";
 
@@ -189,8 +189,9 @@ async function entregasView() {
   const search = async () => {
     try {
       const data = await getEntregasByDate(dateInputToTimestamp($("#desde").value), dateInputToTimestamp($("#hasta").value, true), $("#fuser").value || null);
-      $("#result").innerHTML = `<h3 class="section-title">${data.length} registros</h3>${data.length ? `<div class="table-wrap"><table class="table"><thead><tr><th>Fecha</th><th>Domi</th><th>Cliente</th><th>Empresa</th><th>Total</th><th>GPS</th><th>Estado</th><th>Acción</th></tr></thead><tbody>${data.map(p => `<tr><td>${esc(formatDate(p.timestamp))}</td><td>${esc(p.usuarioNombre)}</td><td>${esc(p.cliente)}</td><td>${esc(p.empresa)}</td><td>${money(p.pago?.total || p.valorPagado || 0)}</td><td>${p.lat != null && p.lng != null ? `<span class="badge green">${Number(p.lat).toFixed(4)}, ${Number(p.lng).toFixed(4)}</span>` : `<span class="badge red">Sin GPS</span>`}</td><td><span class="badge ${p.estado === "anulado" ? "red" : "green"}">${esc(p.estado)}</span></td><td>${p.estado !== "anulado" ? `<button class="btn red cancel" data-id="${p.id}">Anular</button>` : "—"}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty">Sin resultados.</div>`}`;
+      $("#result").innerHTML = `<h3 class="section-title">${data.length} registros</h3>${data.length ? `<div class="table-wrap"><table class="table"><thead><tr><th>Fecha</th><th>Domi</th><th>Cliente</th><th>Empresa</th><th>Total</th><th>Tarifa</th><th>GPS</th><th>Estado</th><th>Acción</th></tr></thead><tbody>${data.map(p => `<tr><td>${esc(formatDate(p.timestamp))}</td><td>${esc(p.usuarioNombre)}</td><td>${esc(p.cliente)}</td><td>${esc(p.empresa)}</td><td>${money(p.pago?.total || p.valorPagado || 0)}</td><td>${money(p.valorDomicilio)}<br><small class="muted">${esc(p.tipoTarifa === "especial" ? "Especial" : p.tarifaMotivo || "Pendiente")}</small></td><td>${p.lat != null && p.lng != null ? `<span class="badge green">${Number(p.lat).toFixed(4)}, ${Number(p.lng).toFixed(4)}</span>` : `<span class="badge red">Sin GPS</span>`}</td><td><span class="badge ${p.estado === "anulado" ? "red" : "green"}">${esc(p.estado)}</span></td><td>${p.estado !== "anulado" ? `${profile.rol === "admin" ? `<button class="btn secondary special-fee" data-id="${p.id}" data-value="${Number(p.valorDomicilio || 0)}">Valor especial</button> ` : ""}<button class="btn red cancel" data-id="${p.id}">Anular</button>` : "—"}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty">Sin resultados.</div>`}`;
       $("#result").querySelectorAll(".cancel").forEach(b => b.onclick = async () => { const motivo = prompt("Motivo de anulación:"); if (!motivo) return; await cancelEntrega(b.dataset.id, motivo, profile); await audit({ accion: "anular_entrega", registroId: b.dataset.id, usuarioId: profile.uid, usuarioNombre: displayName(profile), motivo }); toast("Registro anulado"); await search(); });
+      $("#result").querySelectorAll(".special-fee").forEach(b => b.onclick = async () => { const valor = prompt("Valor especial (debe ser mayor a $15.000):", b.dataset.value); if (valor == null) return; const motivo = prompt("Motivo del valor especial:"); if (!motivo) return; try { await setSpecialDeliveryFee(b.dataset.id, valor, motivo, profile); toast("Valor especial registrado y auditado"); await search(); } catch (e) { toast(e.message); } });
     } catch (e) { $("#result").innerHTML = `<div class="error">${esc(e.message)}</div>`; }
   };
   $("#buscar").onclick = search; await search();
@@ -213,7 +214,7 @@ async function gpsView() {
 
 async function nominaView() {
   const d = today();
-  $("#main").innerHTML = `<div class="page-head"><div><h1>Nómina</h1><div class="muted">Turnos reales + domicilios registrados.</div></div></div><div class="card"><div class="form-grid"><div><label>Desde</label><input id="n1" type="date" value="${d}"></div><div><label>Hasta</label><input id="n2" type="date" value="${d}"></div><div style="align-self:end"><button id="ngo" class="btn primary">Calcular</button></div></div><p class="form-note">Base de turno configurada: $50.000. El valor de cada domicilio debe quedar en <b>valorDomicilio</b> o en la tarifa configurada; no se infiere de forma insegura desde la interfaz.</p></div><div id="nresult" class="card" style="margin-top:15px"><div class="empty">Procesa un rango.</div></div>`;
+  $("#main").innerHTML = `<div class="page-head"><div><h1>Nómina</h1><div class="muted">Turnos reales + domicilios registrados.</div></div></div><div class="card"><div class="form-grid"><div><label>Desde</label><input id="n1" type="date" value="${d}"></div><div><label>Hasta</label><input id="n2" type="date" value="${d}"></div><div style="align-self:end"><button id="ngo" class="btn primary">Calcular</button></div></div><p class="form-note">Base de turno: $50.000. Nómina suma el <b>valorDomicilioCongelado</b> de cada entrega (incluyendo los valores especiales autorizados).</p></div><div id="nresult" class="card" style="margin-top:15px"><div class="empty">Procesa un rango.</div></div>`;
   $("#ngo").onclick = async () => {
     try {
       users = await getUsers();
@@ -224,7 +225,7 @@ async function nominaView() {
         const deliveries = await getEntregasByDate(dateInputToTimestamp(start), dateInputToTimestamp(end, true), u.id);
         const valid = deliveries.filter(x => x.estado !== "anulado");
         const shifts = turns.filter(x => x.usuarioId === u.id).length;
-        const domicilios = valid.reduce((sum, x) => sum + Number(x.valorDomicilio || x.pago?.valorDomicilio || 0), 0);
+        const domicilios = valid.reduce((sum, x) => sum + Number(x.valorDomicilioCongelado ?? x.valorDomicilio ?? 0), 0);
         rows.push({ name: displayName(u), shifts, deliveries: valid.length, base: shifts * 50000, domicilios, total: shifts * 50000 + domicilios });
       }
       $("#nresult").innerHTML = `<h3 class="section-title">Liquidación</h3><div class="table-wrap"><table class="table"><thead><tr><th>Domiciliario</th><th>Turnos</th><th>Domicilios</th><th>Base</th><th>Pago domicilios</th><th>Total</th></tr></thead><tbody>${rows.map(r => `<tr><td>${esc(r.name)}</td><td>${r.shifts}</td><td>${r.deliveries}</td><td>${money(r.base)}</td><td>${money(r.domicilios)}</td><td><b>${money(r.total)}</b></td></tr>`).join("")}</tbody></table></div>`;
