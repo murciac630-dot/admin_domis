@@ -15,6 +15,14 @@ function money(value) {
 function esc(value) {
   return String(value ?? "").replace(/[&<>"']/g, m => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[m]));
 }
+function showToast(message) {
+  const element = $("#toast");
+  if (!element) return;
+  element.textContent = message;
+  element.classList.add("show");
+  clearTimeout(element._timer);
+  element._timer = setTimeout(() => element.classList.remove("show"), 2800);
+}
 
 async function enhanceGpsPage() {
   const placeholder = $(".map-placeholder");
@@ -92,12 +100,15 @@ async function renderConfigPage() {
         },
         version: Number(loadedConfig?.version || 0) + 1
       }, auth.currentUser);
-      button.textContent = "Guardado";
-      setTimeout(() => { button.disabled = false; button.textContent = "Guardar configuración"; }, 1200);
-      if (window.toast) window.toast("Configuración guardada");
+      loadedConfig = await getOperationConfig();
+      button.disabled = false;
+      button.textContent = "Guardar configuración";
+      showToast("Configuración guardada correctamente");
+      await updateConfigPreview();
     } catch (error) {
-      button.disabled = false; button.textContent = "Guardar configuración";
-      alert("No se pudo guardar: " + error.message);
+      button.disabled = false;
+      button.textContent = "Guardar configuración";
+      showToast("No se pudo guardar: " + error.message);
     }
   };
 }
