@@ -4,48 +4,16 @@
       "collectionGroup": "turnos",
       "queryScope": "COLLECTION",
       "fields": [
-        {
-          "fieldPath": "usuarioId",
-          "order": "ASCENDING"
-        },
-        {
-          "fieldPath": "estado",
-          "order": "ASCENDING"
-        }
+        { "fieldPath": "usuarioId", "order": "ASCENDING" },
+        { "fieldPath": "estado", "order": "ASCENDING" }
       ]
     },
     {
       "collectionGroup": "entregas",
       "queryScope": "COLLECTION",
       "fields": [
-        {
-          "fieldPath": "usuarioId",
-          "order": "ASCENDING"
-        },
-        {
-          "fieldPath": "timestamp",
-          "order": "DESCENDING"
-        }
-      ]
-    },
-    {
-      "collectionGroup": "entregas",
-      "queryScope": "COLLECTION",
-      "fields": [
-        {
-          "fieldPath": "timestamp",
-          "order": "DESCENDING"
-        }
-      ]
-    },
-    {
-      "collectionGroup": "usuarios",
-      "queryScope": "COLLECTION",
-      "fields": [
-        {
-          "fieldPath": "nombre",
-          "order": "ASCENDING"
-        }
+        { "fieldPath": "usuarioId", "order": "ASCENDING" },
+        { "fieldPath": "timestamp", "order": "DESCENDING" }
       ]
     }
   ],
