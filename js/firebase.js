@@ -1,6 +1,6 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/12.1.0/firebase-app.js";
 import { getAuth } from "https://www.gstatic.com/firebasejs/12.1.0/firebase-auth.js";
-import { getFirestore } from "https://www.gstatic.com/firebasejs/12.1.0/firebase-firestore.js";
+import { getFirestore, initializeFirestore, persistentLocalCache } from "https://www.gstatic.com/firebasejs/12.1.0/firebase-firestore.js";
 
 // Proyecto Firebase: domis-6947e
 // Estas credenciales Web NO son secretos. La protección real está en
@@ -16,4 +16,9 @@ export const firebaseConfig = {
 
 export const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
-export const db = getFirestore(app);
+
+// IndexedDB permite continuar trabajando cuando la conexión es inestable.
+// Firestore sincroniza las escrituras pendientes cuando vuelve la red.
+export const db = initializeFirestore(app, {
+  localCache: persistentLocalCache()
+});
