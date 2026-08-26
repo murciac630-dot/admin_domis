@@ -1,4 +1,5 @@
 import { db } from "./firebase.js";
+import { calculateDeliveryPricing } from "./maps.js";
 import { addDoc, collection, doc, getDoc, getDocs, limit, orderBy, query, serverTimestamp, setDoc, updateDoc, where } from "https://www.gstatic.com/firebasejs/12.1.0/firebase-firestore.js";
 
 export const col = name => collection(db, name);
@@ -61,8 +62,14 @@ export async function incrementTurnoPedidos(turnoId) {
 }
 
 export async function addEntrega(data) {
+  let pricing = {};
+  if (Number.isFinite(Number(data.lat)) && Number.isFinite(Number(data.lng))) {
+    try { pricing = await calculateDeliveryPricing({ lat: Number(data.lat), lng: Number(data.lng) }); }
+    catch { pricing = { tarifaCalculada: false, tarifaMotivo: "No se pudo calcular la tarifa" }; }
+  }
   const ref = await addDoc(col("entregas"), {
     ...data,
+    ...pricing,
     creadoPor: data.creadoPor || data.usuarioId,
     usuarioEmail: data.usuarioEmail || null,
     timestamp: data.timestamp || serverTimestamp(),
