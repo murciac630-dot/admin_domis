@@ -1,15 +1,15 @@
-const CACHE = "ferco-domis-shell-v23";
+const CACHE = "ferco-domis-shell-v24";
 const SHELL = [
   "./",
   "./index.html",
-  "./css/app.css",
-  "./js/app.js",
+  "./css/app.css?v=24",
+  "./js/app.js?v=24",
   "./js/auth.js",
   "./js/db.js",
   "./js/firebase.js",
   "./js/gps.js",
   "./js/maps.js",
-  "./js/upgrades.js",
+  "./js/upgrades.js?v=24",
   "./manifest.webmanifest"
 ];
 
