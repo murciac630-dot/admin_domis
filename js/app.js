@@ -1,219 +1,271 @@
 import { watchAuth, login, logout, resetPassword, getCurrentProfile } from "./auth.js";
-import { createTurno, closeTurno, getActiveTurno, addEntrega, getOwnEntregas, getEntregasByDate, getUsers, saveUser, cancelEntrega, getAllTracking, audit } from "./db.js";
-import { db } from "./firebase.js";
-import { doc, getDoc, serverTimestamp, Timestamp } from "https://www.gstatic.com/firebasejs/12.1.0/firebase-firestore.js";
+import { createTurno, closeTurno, getActiveTurno, addEntrega, getOwnEntregas, getEntregasByDate, getTurnosByDate, getUsers, saveUser, cancelEntrega, getAllTracking, audit } from "./db.js";
+import { startTracking, stopTracking, captureDeliveryLocation, getCurrentGps } from "./gps.js";
+import { Timestamp } from "https://www.gstatic.com/firebasejs/12.1.0/firebase-firestore.js";
 
-const $=s=>document.querySelector(s);
-let profile=null, activeTurn=null, users=[];
+const $ = s => document.querySelector(s);
+let profile = null;
+let activeTurn = null;
+let users = [];
+let gpsStatus = "inactive";
 
-const navDefs=[
-  ["dashboard","Dashboard",["admin","supervisor"]],
-  ["turno","Mi turno",["admin","supervisor","domiciliario"]],
-  ["entregas","Entregas",["admin","supervisor"]],
-  ["caja","Caja",["admin","supervisor"]],
-  ["gps","GPS en vivo",["admin","supervisor"]],
-  ["nomina","Nómina",["admin","supervisor"]],
-  ["usuarios","Usuarios",["admin"]]
+const navDefs = [
+  ["dashboard", "Dashboard", ["admin", "supervisor"]],
+  ["turno", "Mi turno", ["admin", "supervisor", "domiciliario"]],
+  ["entregas", "Entregas", ["admin", "supervisor"]],
+  ["caja", "Caja", ["admin", "supervisor"]],
+  ["gps", "GPS en vivo", ["admin", "supervisor"]],
+  ["nomina", "Nómina", ["admin", "supervisor"]],
+  ["usuarios", "Usuarios", ["admin"]]
 ];
 
-// Los roles existentes en Firebase son "domiciliario1" y "domiciliario2".
-// Para permisos de interfaz se normalizan a "domiciliario", pero el valor
-// original del campo rol se conserva en Firestore.
-function canonicalRole(rol){
-  return ["domiciliario","domiciliario1","domiciliario2"].includes(rol) ? "domiciliario" : rol;
+function canonicalRole(role) {
+  return ["domiciliario", "domiciliario1", "domiciliario2"].includes(role) ? "domiciliario" : role;
 }
-function isDomiciliario(rol){return canonicalRole(rol)==="domiciliario";}
-function displayName(p){
-  if(p?.nombre) return p.nombre;
-  if(p?.rol === "domiciliario1") return "Domi 1";
-  if(p?.rol === "domiciliario2") return "Domi 2";
-  if(p?.email) return p.email.split("@")[0];
-  return "Usuario";
+function isDomiciliario(role) { return canonicalRole(role) === "domiciliario"; }
+function displayName(p) {
+  if (p?.nombre) return p.nombre;
+  if (p?.rol === "domiciliario1") return "Domi 1";
+  if (p?.rol === "domiciliario2") return "Domi 2";
+  return p?.email?.split("@")[0] || "Usuario";
 }
-
-function toast(m){const t=$("#toast");t.textContent=m;t.classList.add("show");setTimeout(()=>t.classList.remove("show"),2800)}
-function money(v){return new Intl.NumberFormat("es-CO",{style:"currency",currency:"COP",maximumFractionDigits:0}).format(Number(v)||0)}
-function dateInputToDate(v,end=false){return Timestamp.fromDate(new Date(v+(end?"T23:59:59":"T00:00:00")))}
-function esc(v){return String(v??"").replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[m]))}
-
-function renderNav(active="dashboard"){
-  const role=canonicalRole(profile.rol);
-  const items=navDefs.filter(x=>x[2].includes(role));
-  $("#nav").innerHTML=items.map(([id,label])=>`<button class="nav-item ${id===active?"active":""}" data-route="${id}">${label}</button>`).join("");
-  $("#nav").querySelectorAll("[data-route]").forEach(b=>b.onclick=()=>route(b.dataset.route));
+function toast(message) {
+  const t = $("#toast"); if (!t) return;
+  t.textContent = message; t.classList.add("show");
+  clearTimeout(t._timer); t._timer = setTimeout(() => t.classList.remove("show"), 2800);
 }
+function money(value) { return new Intl.NumberFormat("es-CO", { style: "currency", currency: "COP", maximumFractionDigits: 0 }).format(Number(value) || 0); }
+function esc(value) { return String(value ?? "").replace(/[&<>"']/g, m => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[m])); }
+function dateInputToTimestamp(value, end = false) { return Timestamp.fromDate(new Date(value + (end ? "T23:59:59" : "T00:00:00"))); }
+function formatDate(value) {
+  if (!value) return "—";
+  const d = value?.toDate ? value.toDate() : new Date(value);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleString("es-CO", { dateStyle: "short", timeStyle: "short" });
+}
+function today() { return new Date().toISOString().slice(0, 10); }
 
-async function route(r){
-  renderNav(r);$("#sidebar").classList.remove("open");
-  if(r==="dashboard") return dashboard();
-  if(r==="turno") return turnoView();
-  if(r==="entregas") return entregasView();
-  if(r==="caja") return cajaView();
-  if(r==="gps") return gpsView();
-  if(r==="nomina") return nominaView();
-  if(r==="usuarios") return usuariosView();
+function setNetworkStatus() {
+  const el = $("#network-status"); if (!el) return;
+  el.textContent = navigator.onLine ? "En línea" : "Sin conexión · guardado local";
+  el.className = `network-status ${navigator.onLine ? "online" : "offline"}`;
 }
 
-async function dashboard(){
-  if(isDomiciliario(profile.rol)) return turnoView();
-  $("#main").innerHTML=`<div class="page-head"><div><h1>Dashboard</h1><div class="muted">Resumen operativo</div></div></div>
-  <div class="grid cards"><div class="card"><div class="metric" id="m-users">…</div><div class="metric-label">Usuarios</div></div>
-  <div class="card"><div class="metric" id="m-active">…</div><div class="metric-label">Turnos activos</div></div>
-  <div class="card"><div class="metric" id="m-gps">…</div><div class="metric-label">Ubicaciones en vivo</div></div></div>
-  <div class="card" style="margin-top:15px"><h3 class="section-title">Arquitectura activa</h3><p class="muted">Una sola aplicación. La interfaz y las operaciones dependen del rol autenticado. Firestore Rules aplican la seguridad real.</p></div>`;
-  users=await getUsers();$("#m-users").textContent=users.filter(u=>u.activo!==false).length;
-  const tr=await getAllTracking();$("#m-gps").textContent=tr.length;
-  const active=await Promise.all(users.map(u=>getActiveTurno(u.id)));$("#m-active").textContent=active.filter(Boolean).length;
+function setGpsStatus(status, message = "") {
+  gpsStatus = status;
+  const labels = { inactive: "GPS inactivo", requesting: "Solicitando GPS…", active: "GPS activo", error: "GPS con alerta", unsupported: "GPS no disponible" };
+  document.querySelectorAll("[data-gps-status]").forEach(el => {
+    el.textContent = labels[status] || status;
+    el.className = `badge ${status === "active" ? "green" : status === "error" ? "red" : "yellow"}`;
+    if (message) el.title = message;
+  });
 }
 
-async function turnoView(){
-  activeTurn=await getActiveTurno(profile.uid);
-  const pedidos=await getOwnEntregas(profile.uid);
-  $("#main").innerHTML=`<div class="page-head"><div><h1>Mi turno</h1><div class="muted">${esc(displayName(profile))} · ${esc(profile.rol)}</div></div></div>
-  ${activeTurn?`<div class="card"><div class="toolbar"><span class="badge green">TURNO ACTIVO</span><span>Pedidos: <b>${pedidos.filter(p=>p.estado!=="anulado").length}</b></span><button class="btn red" id="finish">Finalizar turno</button></div></div>`:
-  `<div class="card"><h3 class="section-title">No hay turno activo</h3><button class="btn green" id="start">Iniciar turno</button></div>`}
-  ${activeTurn?`<div class="card" style="margin-top:15px"><h3 class="section-title">Nuevo pedido</h3>
-  <form id="pedido" class="form-grid">
-    <div><label>Cliente</label><input id="cliente" required></div>
-    <div><label>Empresa</label><select id="empresa"><option>Ferco Farma</option><option>Hades</option></select></div>
-    <div><label>Total</label><input id="total" type="number" min="0" value="0"></div>
-    <div><label>Medio de pago</label><select id="medio"><option value="efectivo">Efectivo</option><option value="transferencia">Transferencia</option><option value="datafono">Datáfono</option><option value="credito">Crédito</option><option value="garantia">Garantía/Cruce</option></select></div>
-    <div><label>Latitud</label><input id="lat" type="number" step="any" placeholder="Opcional"></div>
-    <div><label>Longitud</label><input id="lng" type="number" step="any" placeholder="Opcional"></div>
-    <div style="grid-column:1/-1"><button class="btn primary" type="submit">Registrar pedido</button></div>
-  </form></div>`:""}
-  <div class="card" style="margin-top:15px"><h3 class="section-title">Mis pedidos recientes</h3>${pedidos.length?`<div class="table-wrap"><table class="table"><thead><tr><th>Fecha</th><th>Cliente</th><th>Empresa</th><th>Total</th><th>Estado</th></tr></thead><tbody>${pedidos.map(p=>`<tr><td>${esc(formatDate(p.timestamp))}</td><td>${esc(p.cliente)}</td><td>${esc(p.empresa)}</td><td>${money(p.pago?.total||p.valorPagado||0)}</td><td><span class="badge ${p.estado==="anulado"?"red":"green"}">${esc(p.estado||"registrado")}</span></td></tr>`).join("")}</tbody></table></div>`:`<div class="empty">Sin pedidos registrados.</div>`}</div>`;
-  if($("#start"))$("#start").onclick=async()=>{activeTurn=await createTurno(profile);toast("Turno iniciado");route("turno")};
-  if($("#finish"))$("#finish").onclick=async()=>{if(confirm("¿Cerrar el turno?")){await closeTurno(activeTurn.id);toast("Turno cerrado");route("turno")}};
-  if($("#pedido"))$("#pedido").onsubmit=async e=>{e.preventDefault();const total=Number($("#total").value)||0;let lat=Number($("#lat").value),lng=Number($("#lng").value);if(!lat||!lng){try{const pos=await new Promise((res,rej)=>navigator.geolocation.getCurrentPosition(res,rej,{enableHighAccuracy:true,timeout:7000}));lat=pos.coords.latitude;lng=pos.coords.longitude}catch{}}
-    await addEntrega({usuarioId:profile.uid,usuarioNombre:displayName(profile),creadoPor:profile.uid,turnoId:activeTurn.id,empresa:$("#empresa").value,cliente:$("#cliente").value.trim(),timestamp:null,lat:lat||null,lng:lng||null,pago:{estado:total>0?"pagado":"sin_pago",total,medios:[{medio:$("#medio").value,valor:total}]}});
-    toast("Pedido registrado");route("turno");
-  };
+function renderNav(active = "dashboard") {
+  const role = canonicalRole(profile?.rol);
+  const items = navDefs.filter(x => x[2].includes(role));
+  $("#nav").innerHTML = items.map(([id, label]) => `<button class="nav-item ${id === active ? "active" : ""}" data-route="${id}">${label}</button>`).join("");
+  $("#nav").querySelectorAll("[data-route]").forEach(b => b.onclick = () => route(b.dataset.route));
 }
 
-async function entregasView(){
-  $("#main").innerHTML=`<div class="page-head"><div><h1>Entregas</h1><div class="muted">Consulta y control operativo</div></div></div>
-  <div class="card"><div class="form-grid"><div><label>Desde</label><input id="desde" type="date"></div><div><label>Hasta</label><input id="hasta" type="date"></div><div><label>Domiciliario</label><select id="fuser"><option value="">Todos</option></select></div><div style="align-self:end"><button id="buscar" class="btn primary">Consultar</button></div></div></div>
-  <div id="result" class="card" style="margin-top:15px"><div class="empty">Selecciona un rango.</div></div>`;
-  users=await getUsers();$("#fuser").innerHTML+=users.filter(u=>isDomiciliario(u.rol)&&u.activo!==false).map(u=>`<option value="${u.id}">${esc(displayName(u))}</option>`).join("");
-  const today=new Date().toISOString().slice(0,10);$("#desde").value=today;$("#hasta").value=today;
-  $("#buscar").onclick=async()=>{try{const data=await getEntregasByDate(dateInputToDate($("#desde").value),dateInputToDate($("#hasta").value,true),$("#fuser").value||null);$("#result").innerHTML=`<h3 class="section-title">${data.length} registros</h3>${data.length?`<div class="table-wrap"><table class="table"><thead><tr><th>Fecha</th><th>Domi</th><th>Cliente</th><th>Empresa</th><th>Total</th><th>Estado</th><th>Acción</th></tr></thead><tbody>${data.map(p=>`<tr><td>${esc(formatDate(p.timestamp))}</td><td>${esc(p.usuarioNombre)}</td><td>${esc(p.cliente)}</td><td>${esc(p.empresa)}</td><td>${money(p.pago?.total||p.valorPagado||0)}</td><td>${esc(p.estado)}</td><td>${p.estado!=="anulado"?`<button class="btn red cancel" data-id="${p.id}">Anular</button>`:"—"}</td></tr>`).join("")}</tbody></table></div>`:`<div class="empty">Sin resultados.</div>`}`;$("#result").querySelectorAll(".cancel").forEach(b=>b.onclick=async()=>{const motivo=prompt("Motivo de anulación:");if(motivo){await cancelEntrega(b.dataset.id,motivo,profile);await audit({accion:"anular_entrega",registroId:b.dataset.id,usuarioId:profile.uid,usuarioNombre:displayName(profile),motivo});toast("Registro anulado");$("#buscar").click()}})}catch(e){toast("No se pudo consultar: "+e.message)}};
+async function route(routeName) {
+  renderNav(routeName); $("#sidebar")?.classList.remove("open");
+  if (routeName === "dashboard") return dashboardView();
+  if (routeName === "turno") return turnoView();
+  if (routeName === "entregas") return entregasView();
+  if (routeName === "caja") return cajaView();
+  if (routeName === "gps") return gpsView();
+  if (routeName === "nomina") return nominaView();
+  if (routeName === "usuarios") return usuariosView();
 }
 
-async function cajaView(){
-  const today=new Date().toISOString().slice(0,10);$("#main").innerHTML=`<div class="page-head"><div><h1>Caja</h1><div class="muted">Consolidado por medio de pago</div></div></div><div class="card"><div class="form-grid"><div><label>Desde</label><input id="c1" type="date" value="${today}"></div><div><label>Hasta</label><input id="c2" type="date" value="${today}"></div><div style="align-self:end"><button id="cgo" class="btn primary">Procesar</button></div></div></div><div id="cresult" class="grid cards" style="margin-top:15px"></div>`;
-  $("#cgo").onclick=async()=>{const data=await getEntregasByDate(dateInputToDate($("#c1").value),dateInputToDate($("#c2").value,true));const sums={efectivo:0,transferencia:0,datafono:0,credito:0,garantia:0,total:0};data.filter(x=>x.estado!=="anulado").forEach(x=>(x.pago?.medios||[]).forEach(m=>{const k=m.medio;const v=Number(m.valor)||0;if(sums[k]!==undefined)sums[k]+=v;sums.total+=v}));$("#cresult").innerHTML=Object.entries(sums).map(([k,v])=>`<div class="card"><div class="metric">${money(v)}</div><div class="metric-label">${k}</div></div>`).join("")};$("#cgo").click();
+async function startDomiciliaryGps() {
+  if (!activeTurn || !isDomiciliario(profile.rol)) return;
+  try {
+    setGpsStatus("requesting");
+    await startTracking(profile, ({ status, message }) => setGpsStatus(status, message));
+  } catch (error) {
+    setGpsStatus("error", error.message);
+    toast(error.message);
+  }
 }
 
-async function gpsView(){const data=await getAllTracking();$("#main").innerHTML=`<div class="page-head"><div><h1>GPS en vivo</h1><div class="muted">${data.length} posiciones publicadas</div></div><button class="btn secondary" id="refresh-gps">Actualizar</button></div><div class="grid cards">${data.map(x=>`<div class="card"><b>${esc(x.usuarioNombre||x.usuarioId)}</b><p class="muted">${esc(x.lat)}, ${esc(x.lng)}</p><span class="badge green">${esc(formatDate(x.actualizadoEn))}</span></div>`).join("")||`<div class="card empty">No hay posiciones.</div>`}</div><div class="map-placeholder" style="margin-top:15px">Mapa visual: integrar Leaflet/Google Maps en la siguiente iteración. Los datos GPS ya quedan separados de los pedidos.</div>`;$("#refresh-gps").onclick=()=>route("gps")}
+function stopDomiciliaryGps() {
+  stopTracking();
+  setGpsStatus("inactive");
+}
 
-async function nominaView(){const today=new Date().toISOString().slice(0,10);$("#main").innerHTML=`<div class="page-head"><div><h1>Nómina</h1><div class="muted">Basada en turnos reales, no en inferencias de pedidos.</div></div></div><div class="card"><div class="form-grid"><div><label>Desde</label><input id="n1" type="date" value="${today}"></div><div><label>Hasta</label><input id="n2" type="date" value="${today}"></div><div style="align-self:end"><button id="ngo" class="btn primary">Calcular</button></div></div></div><div id="nresult" class="card" style="margin-top:15px"><div class="empty">Procesa un rango.</div></div>`;$("#ngo").onclick=async()=>{users=await getUsers();const rows=[];for(const u of users.filter(x=>x.rol==="domiciliario"&&x.activo!==false)){const qs=await getEntregasByDate(dateInputToDate($("#n1").value),dateInputToDate($("#n2").value,true),u.id);const turnos=[...new Set(qs.map(q=>q.turnoId).filter(Boolean))];rows.push({u,turnos:turnos.length,pedidos:qs.filter(q=>q.estado!=="anulado").length,domis:qs.filter(q=>q.estado!=="anulado").reduce((s,q)=>s+Number(q.tarifaDomicilio||0),0)})}$("#nresult").innerHTML=`<div class="table-wrap"><table class="table"><thead><tr><th>Domiciliario</th><th>Turnos</th><th>Pedidos</th><th>Base</th><th>Domicilios</th><th>Total</th></tr></thead><tbody>${rows.map(r=>{const base=r.turnos*50000;return`<tr><td>${esc(displayName(r.u))}</td><td>${r.turnos}</td><td>${r.pedidos}</td><td>${money(base)}</td><td>${money(r.domis)}</td><td><b>${money(base+r.domis)}</b></td></tr>`}).join("")}</tbody></table></div>`};}
+async function dashboardView() {
+  if (isDomiciliario(profile.rol)) return turnoView();
+  $("#main").innerHTML = `<div class="page-head"><div><h1>Dashboard</h1><div class="muted">Resumen operativo</div></div></div>
+    <div class="grid cards"><div class="card"><div class="metric" id="m-users">…</div><div class="metric-label">Usuarios activos</div></div>
+    <div class="card"><div class="metric" id="m-active">…</div><div class="metric-label">Turnos activos</div></div>
+    <div class="card"><div class="metric" id="m-gps">…</div><div class="metric-label">GPS publicados</div></div></div>
+    <div class="card" style="margin-top:15px"><h3 class="section-title">Sistema unificado</h3><p class="muted">Una sola aplicación. La interfaz cambia según el rol autenticado y Firestore aplica la seguridad real.</p></div>`;
+  try {
+    users = await getUsers();
+    $("#m-users").textContent = users.filter(u => u.activo !== false).length;
+    const tracking = await getAllTracking(); $("#m-gps").textContent = tracking.length;
+    const active = await Promise.all(users.map(u => getActiveTurno(u.id))); $("#m-active").textContent = active.filter(Boolean).length;
+  } catch (e) { toast("No se pudo cargar el dashboard: " + e.message); }
+}
 
-async function usuariosView(){
-  if(profile.rol!=="admin") return;
-  users=await getUsers();
+async function turnoView() {
+  activeTurn = await getActiveTurno(profile.uid);
+  const pedidos = await getOwnEntregas(profile.uid);
+  const validPedidos = pedidos.filter(p => p.estado !== "anulado");
+  const totalPagos = validPedidos.reduce((sum, p) => sum + Number(p.pago?.total || p.valorPagado || 0), 0);
+  const gps = getCurrentGps();
 
-  const renderRows=()=>users.map(u=>`<tr>
-    <td class="td-mono">${esc(u.id)}</td>
-    <td>${esc(displayName(u))}</td>
-    <td>${esc(u.email||"")}</td>
-    <td><span class="badge blue">${esc(u.rol||"")}</span></td>
-    <td>${u.activo!==false && u.activo!=="false" ? "Sí" : "No"}</td>
-    <td><button class="btn secondary btn-edit-user" data-uid="${esc(u.id)}">Editar</button></td>
-  </tr>`).join("");
+  $("#main").innerHTML = `<div class="page-head"><div><h1>Mi turno</h1><div class="muted">${esc(displayName(profile))}</div></div><span data-gps-status class="badge yellow">GPS inactivo</span></div>
+    ${activeTurn ? `<div class="card"><div class="toolbar"><span class="badge green">TURNO ACTIVO</span><span>Pedidos: <b>${validPedidos.length}</b></span><span>Total: <b>${money(totalPagos)}</b></span><button class="btn red" id="finish">Finalizar turno</button></div></div>` : `<div class="card"><h3 class="section-title">No hay turno activo</h3><p class="muted">Al iniciar el turno se solicitará el permiso de ubicación del dispositivo.</p><button class="btn green" id="start">Iniciar turno</button></div>`}
+    ${activeTurn ? `<div class="card shift-card" style="margin-top:15px"><div class="section-head-row"><div><h3 class="section-title">Nuevo pedido</h3><div class="muted">La ubicación se captura automáticamente. No necesitas escribir coordenadas.</div></div><span class="badge ${navigator.onLine ? "green" : "yellow"}">${navigator.onLine ? "Sincronización activa" : "Sin conexión"}</span></div>
+      <form id="pedido" class="form-grid">
+        <div><label>Cliente</label><input id="cliente" required autocomplete="off"></div>
+        <div><label>Empresa</label><select id="empresa"><option>Ferco Farma</option><option>Hades</option></select></div>
+        <div><label>Total</label><input id="total" type="number" min="0" step="1" value="0" inputmode="numeric"></div>
+        <div><label>Medio de pago</label><select id="medio"><option value="efectivo">Efectivo</option><option value="transferencia">Transferencia</option><option value="datafono">Datáfono</option><option value="credito">Crédito</option><option value="garantia">Garantía/Cruce</option></select></div>
+        <div class="location-state" style="grid-column:1/-1"><span class="location-icon">⌖</span><div><strong>Ubicación de entrega</strong><div class="muted" id="location-copy">${gps ? `Capturada · precisión aprox. ${Math.round(gps.accuracy || 0)} m` : "Se capturará automáticamente al registrar el pedido."}</div></div></div>
+        <div style="grid-column:1/-1"><button class="btn primary" id="submit-pedido" type="submit">Registrar pedido</button></div>
+      </form></div>` : ""}
+    <div class="grid cards stats-row" style="margin-top:15px"><div class="card"><div class="metric">${validPedidos.length}</div><div class="metric-label">Pedidos</div></div><div class="card"><div class="metric">${money(totalPagos)}</div><div class="metric-label">Pagos registrados</div></div><div class="card"><div class="metric">${pedidos.filter(p => p.estado === "anulado").length}</div><div class="metric-label">Anulados</div></div></div>
+    <div class="card" style="margin-top:15px"><h3 class="section-title">Mis pedidos recientes</h3>${pedidos.length ? `<div class="table-wrap"><table class="table"><thead><tr><th>Fecha</th><th>Cliente</th><th>Empresa</th><th>Total</th><th>Estado</th></tr></thead><tbody>${pedidos.map(p => `<tr><td>${esc(formatDate(p.timestamp))}</td><td>${esc(p.cliente)}</td><td>${esc(p.empresa)}</td><td>${money(p.pago?.total || p.valorPagado || 0)}</td><td><span class="badge ${p.estado === "anulado" ? "red" : "green"}">${esc(p.estado || "registrado")}</span></td></tr>`).join("")}</tbody></table></div>` : `<div class="empty">Sin pedidos registrados.</div>`}</div>`;
 
-  const todayHint="Los cambios de este formulario modifican el perfil de Firestore. El correo de inicio de sesión de Firebase Authentication no se cambia desde aquí.";
+  if (activeTurn) {
+    setGpsStatus(gps ? "active" : "inactive");
+    if (gpsStatus !== "active") await startDomiciliaryGps();
+  }
 
-  const renderFormDefaults=()=>{
-    $("#uf").reset();
-    $("#uid").value="";
-    $("#uid").readOnly=false;
-    $("#uid").classList.remove("readonly");
-    $("#urole").value="domiciliario1";
-    $("#uactivo").value="true";
-    $("#uf-title").textContent="Nuevo perfil";
-    $("#btn-cancel-user").classList.add("hidden");
-    $("#uf-submit").textContent="Guardar perfil";
-    $("#user-form-note").textContent=todayHint;
-  };
+  $("#start")?.addEventListener("click", async () => {
+    const button = $("#start"); button.disabled = true; button.textContent = "Iniciando…";
+    try {
+      activeTurn = await createTurno(profile);
+      await startDomiciliaryGps();
+      toast("Turno iniciado"); await turnoView();
+    } catch (e) { toast(e.message); button.disabled = false; button.textContent = "Iniciar turno"; }
+  });
 
-  const loadUser=(uid)=>{
-    const u=users.find(x=>x.id===uid);
-    if(!u) return;
-    $("#uid").value=u.id;
-    $("#uid").readOnly=true;
-    $("#uid").classList.add("readonly");
-    $("#unombre").value=displayName(u);
-    $("#uemail").value=u.email||"";
-    $("#urole").value=u.rol||"domiciliario1";
-    $("#uactivo").value=(u.activo!==false && u.activo!=="false")?"true":"false";
-    $("#uf-title").textContent=`Editar perfil · ${displayName(u)}`;
-    $("#btn-cancel-user").classList.remove("hidden");
-    $("#uf-submit").textContent="Guardar cambios";
-    $("#user-form-note").textContent=todayHint;
-    window.scrollTo({top:0,behavior:"smooth"});
-  };
+  $("#finish")?.addEventListener("click", async () => {
+    if (!confirm("¿Cerrar el turno y detener el GPS?")) return;
+    try { await closeTurno(activeTurn.id); stopDomiciliaryGps(); toast("Turno cerrado"); await turnoView(); }
+    catch (e) { toast("No se pudo cerrar el turno: " + e.message); }
+  });
 
-  $("#main").innerHTML=`
-    <div class="page-head">
-      <div><h1>Usuarios</h1><div class="muted">El administrador gestiona perfiles y permisos. Las cuentas de Authentication se crean desde Firebase Console o Admin SDK.</div></div>
-    </div>
-
-    <div class="card">
-      <h3 class="section-title" id="uf-title">Nuevo perfil</h3>
-      <form id="uf" class="form-grid">
-        <div><label>UID</label><input id="uid" required placeholder="UID de Authentication"></div>
-        <div><label>Nombre</label><input id="unombre" required placeholder="Nombre visible"></div>
-        <div><label>Correo del perfil</label><input id="uemail" type="email" placeholder="usuario@fercofarma.com"></div>
-        <div><label>Rol</label><select id="urole"><option value="domiciliario1">domiciliario1</option><option value="domiciliario2">domiciliario2</option><option value="supervisor">supervisor</option><option value="admin">admin</option></select></div>
-        <div><label>Activo</label><select id="uactivo"><option value="true">Sí</option><option value="false">No</option></select></div>
-        <div class="form-actions" style="align-self:end">
-          <button id="uf-submit" class="btn green" type="submit">Guardar perfil</button>
-          <button id="btn-cancel-user" class="btn secondary hidden" type="button">Cancelar edición</button>
-        </div>
-      </form>
-      <div id="user-form-note" class="form-note">${todayHint}</div>
-    </div>
-
-    <div class="card" style="margin-top:15px">
-      <div class="section-head-row"><h3 class="section-title">Perfiles registrados</h3><span class="muted">${users.length} perfiles</span></div>
-      <div class="table-wrap">
-        <table class="table">
-          <thead><tr><th>UID</th><th>Nombre</th><th>Email</th><th>Rol</th><th>Activo</th><th>Acción</th></tr></thead>
-          <tbody id="users-tbody">${renderRows()}</tbody>
-        </table>
-      </div>
-    </div>`;
-
-  $("#uf").onsubmit=async e=>{
-    e.preventDefault();
-    const uid=$("#uid").value.trim();
-    if(!uid) return;
-    try{
-      await saveUser(uid,{
-        nombre:$("#unombre").value.trim(),
-        email:$("#uemail").value.trim(),
-        rol:$("#urole").value,
-        activo:$("#uactivo").value==="true"
+  $("#pedido")?.addEventListener("submit", async event => {
+    event.preventDefault();
+    const button = $("#submit-pedido"); button.disabled = true; button.textContent = "Capturando ubicación…";
+    try {
+      const location = await captureDeliveryLocation();
+      const total = Number($("#total").value) || 0;
+      await addEntrega({
+        usuarioId: profile.uid,
+        usuarioNombre: displayName(profile),
+        usuarioEmail: profile.email,
+        creadoPor: profile.uid,
+        turnoId: activeTurn.id,
+        empresa: $("#empresa").value,
+        cliente: $("#cliente").value.trim(),
+        lat: location.lat,
+        lng: location.lng,
+        accuracy: location.accuracy ?? null,
+        gpsCapturadoEn: location.timestamp,
+        pago: { estado: total > 0 ? "pagado" : "sin_pago", total, medios: [{ medio: $("#medio").value, valor: total }] }
       });
-      toast($("#btn-cancel-user").classList.contains("hidden")?"Perfil creado":"Perfil actualizado");
-      users=await getUsers();
-      $("#users-tbody").innerHTML=renderRows();
-      $("#users-tbody").querySelectorAll(".btn-edit-user").forEach(b=>b.onclick=()=>loadUser(b.dataset.uid));
-      renderFormDefaults();
-    }catch(e){toast("No se pudo guardar el perfil: "+e.message)}
-  };
-
-  $("#users-tbody").querySelectorAll(".btn-edit-user").forEach(b=>b.onclick=()=>loadUser(b.dataset.uid));
-  $("#btn-cancel-user").onclick=renderFormDefaults;
+      toast(navigator.onLine ? "Pedido registrado y sincronizado" : "Pedido guardado; se sincronizará al volver la conexión");
+      await turnoView();
+    } catch (e) {
+      toast("No se pudo registrar el pedido: " + e.message);
+      button.disabled = false; button.textContent = "Registrar pedido";
+    }
+  });
 }
 
-function formatDate(v){if(!v)return"—";try{if(v.toDate)return v.toDate().toLocaleString("es-CO");if(v.seconds)return new Date(v.seconds*1000).toLocaleString("es-CO");return new Date(v).toLocaleString("es-CO")}catch{return"—"}}
+async function entregasView() {
+  const d = today();
+  $("#main").innerHTML = `<div class="page-head"><div><h1>Entregas</h1><div class="muted">Consulta y control operativo</div></div></div>
+    <div class="card"><div class="form-grid"><div><label>Desde</label><input id="desde" type="date" value="${d}"></div><div><label>Hasta</label><input id="hasta" type="date" value="${d}"></div><div><label>Domiciliario</label><select id="fuser"><option value="">Todos</option></select></div><div style="align-self:end"><button id="buscar" class="btn primary">Consultar</button></div></div></div>
+    <div id="result" class="card" style="margin-top:15px"><div class="empty">Cargando…</div></div>`;
+  users = await getUsers(); $("#fuser").innerHTML += users.filter(u => isDomiciliario(u.rol) && u.activo !== false).map(u => `<option value="${u.id}">${esc(displayName(u))}</option>`).join("");
+  const search = async () => {
+    try {
+      const data = await getEntregasByDate(dateInputToTimestamp($("#desde").value), dateInputToTimestamp($("#hasta").value, true), $("#fuser").value || null);
+      $("#result").innerHTML = `<h3 class="section-title">${data.length} registros</h3>${data.length ? `<div class="table-wrap"><table class="table"><thead><tr><th>Fecha</th><th>Domi</th><th>Cliente</th><th>Empresa</th><th>Total</th><th>GPS</th><th>Estado</th><th>Acción</th></tr></thead><tbody>${data.map(p => `<tr><td>${esc(formatDate(p.timestamp))}</td><td>${esc(p.usuarioNombre)}</td><td>${esc(p.cliente)}</td><td>${esc(p.empresa)}</td><td>${money(p.pago?.total || p.valorPagado || 0)}</td><td>${p.lat != null && p.lng != null ? `<span class="badge green">${Number(p.lat).toFixed(4)}, ${Number(p.lng).toFixed(4)}</span>` : `<span class="badge red">Sin GPS</span>`}</td><td><span class="badge ${p.estado === "anulado" ? "red" : "green"}">${esc(p.estado)}</span></td><td>${p.estado !== "anulado" ? `<button class="btn red cancel" data-id="${p.id}">Anular</button>` : "—"}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty">Sin resultados.</div>`}`;
+      $("#result").querySelectorAll(".cancel").forEach(b => b.onclick = async () => { const motivo = prompt("Motivo de anulación:"); if (!motivo) return; await cancelEntrega(b.dataset.id, motivo, profile); await audit({ accion: "anular_entrega", registroId: b.dataset.id, usuarioId: profile.uid, usuarioNombre: displayName(profile), motivo }); toast("Registro anulado"); await search(); });
+    } catch (e) { $("#result").innerHTML = `<div class="error">${esc(e.message)}</div>`; }
+  };
+  $("#buscar").onclick = search; await search();
+}
 
-$("#login-form").onsubmit=async e=>{e.preventDefault();$("#login-error").classList.add("hidden");try{await login($("#login-email").value.trim(),$("#login-password").value)}catch(err){$("#login-error").textContent=humanAuthError(err);$("#login-error").classList.remove("hidden")}};
-$("#forgot-password").onclick=async()=>{try{await resetPassword($("#login-email").value.trim());toast("Revisa tu correo para restablecer la contraseña")}catch(e){toast("Indica primero un correo válido")}};
-$("#logout").onclick=()=>logout();$("#menu-toggle").onclick=()=>$("#sidebar").classList.toggle("open");
+async function cajaView() {
+  const d = today();
+  $("#main").innerHTML = `<div class="page-head"><div><h1>Caja</h1><div class="muted">Consolidado por medio de pago</div></div></div><div class="card"><div class="form-grid"><div><label>Desde</label><input id="c1" type="date" value="${d}"></div><div><label>Hasta</label><input id="c2" type="date" value="${d}"></div><div style="align-self:end"><button id="cgo" class="btn primary">Procesar</button></div></div></div><div id="cresult" class="grid cards" style="margin-top:15px"></div>`;
+  const process = async () => { const data = await getEntregasByDate(dateInputToTimestamp($("#c1").value), dateInputToTimestamp($("#c2").value, true)); const sums = { efectivo: 0, transferencia: 0, datafono: 0, credito: 0, garantia: 0, total: 0 }; data.filter(x => x.estado !== "anulado").forEach(x => (x.pago?.medios || []).forEach(m => { const v = Number(m.valor) || 0; if (sums[m.medio] !== undefined) sums[m.medio] += v; sums.total += v; })); $("#cresult").innerHTML = Object.entries(sums).map(([k, v]) => `<div class="card"><div class="metric">${money(v)}</div><div class="metric-label">${k}</div></div>`).join(""); };
+  $("#cgo").onclick = process; await process();
+}
 
-function humanAuthError(e){const c=e?.code||"";if(c.includes("invalid-credential"))return"Correo o contraseña incorrectos.";if(c.includes("too-many-requests"))return"Demasiados intentos. Intenta más tarde.";if(c.includes("user-disabled"))return"Usuario deshabilitado.";return e?.message||"No fue posible iniciar sesión."}
+async function gpsView() {
+  const data = await getAllTracking();
+  $("#main").innerHTML = `<div class="page-head"><div><h1>GPS en vivo</h1><div class="muted">${data.length} posiciones actuales</div></div><button class="btn secondary" id="refresh-gps">Actualizar</button></div>
+    <div class="grid cards">${data.map(x => `<div class="card"><div class="section-head-row"><b>${esc(x.usuarioNombre || x.usuarioId)}</b><span class="badge green">ACTIVO</span></div><p class="muted">${Number(x.lat).toFixed(6)}, ${Number(x.lng).toFixed(6)}</p><p class="muted">Precisión: ${Math.round(Number(x.accuracy) || 0)} m</p><span class="badge blue">${esc(formatDate(x.actualizadoEn))}</span></div>`).join("") || `<div class="card empty">No hay posiciones publicadas.</div>`}</div>
+    <div class="map-placeholder" style="margin-top:15px">Mapa visual preparado para la siguiente iteración. Los puntos GPS ya quedan separados de los pedidos.</div>`;
+  $("#refresh-gps").onclick = () => route("gps");
+}
 
-watchAuth(async user=>{if(!user){profile=null;$("#app").classList.add("hidden");$("#login-screen").classList.remove("hidden");return}try{profile=await getCurrentProfile(user);$("#login-screen").classList.add("hidden");$("#app").classList.remove("hidden");$("#user-name").textContent=profile.nombre;$("#user-role").textContent=profile.rol;renderNav(profile.rol==="domiciliario"?"turno":"dashboard");await route(profile.rol==="domiciliario"?"turno":"dashboard")}catch(e){await logout();$("#login-error").textContent=e.message;$("#login-error").classList.remove("hidden")}});
+async function nominaView() {
+  const d = today();
+  $("#main").innerHTML = `<div class="page-head"><div><h1>Nómina</h1><div class="muted">Turnos reales + domicilios registrados.</div></div></div><div class="card"><div class="form-grid"><div><label>Desde</label><input id="n1" type="date" value="${d}"></div><div><label>Hasta</label><input id="n2" type="date" value="${d}"></div><div style="align-self:end"><button id="ngo" class="btn primary">Calcular</button></div></div><p class="form-note">Base de turno configurada: $50.000. El valor de cada domicilio debe quedar en <b>valorDomicilio</b> o en la tarifa configurada; no se infiere de forma insegura desde la interfaz.</p></div><div id="nresult" class="card" style="margin-top:15px"><div class="empty">Procesa un rango.</div></div>`;
+  $("#ngo").onclick = async () => {
+    try {
+      users = await getUsers();
+      const start = $("#n1").value, end = $("#n2").value;
+      const turns = await getTurnosByDate(start, end);
+      const rows = [];
+      for (const u of users.filter(x => isDomiciliario(x.rol) && x.activo !== false)) {
+        const deliveries = await getEntregasByDate(dateInputToTimestamp(start), dateInputToTimestamp(end, true), u.id);
+        const valid = deliveries.filter(x => x.estado !== "anulado");
+        const shifts = turns.filter(x => x.usuarioId === u.id).length;
+        const domicilios = valid.reduce((sum, x) => sum + Number(x.valorDomicilio || x.pago?.valorDomicilio || 0), 0);
+        rows.push({ name: displayName(u), shifts, deliveries: valid.length, base: shifts * 50000, domicilios, total: shifts * 50000 + domicilios });
+      }
+      $("#nresult").innerHTML = `<h3 class="section-title">Liquidación</h3><div class="table-wrap"><table class="table"><thead><tr><th>Domiciliario</th><th>Turnos</th><th>Domicilios</th><th>Base</th><th>Pago domicilios</th><th>Total</th></tr></thead><tbody>${rows.map(r => `<tr><td>${esc(r.name)}</td><td>${r.shifts}</td><td>${r.deliveries}</td><td>${money(r.base)}</td><td>${money(r.domicilios)}</td><td><b>${money(r.total)}</b></td></tr>`).join("")}</tbody></table></div>`;
+    } catch (e) { $("#nresult").innerHTML = `<div class="error">${esc(e.message)}</div>`; }
+  };
+}
+
+async function usuariosView() {
+  users = await getUsers();
+  $("#main").innerHTML = `<div class="page-head"><div><h1>Usuarios</h1><div class="muted">El administrador gestiona el perfil y permisos. Las cuentas de Authentication se crean desde Firebase Console o Admin SDK.</div></div></div>
+    <div class="card"><h3 class="section-title">Perfil de usuario</h3><form id="user-form" class="form-grid"><div><label>UID</label><input id="u-uid" class="readonly" readonly></div><div><label>Nombre</label><input id="u-name"></div><div><label>Correo</label><input id="u-email" type="email"></div><div><label>Rol</label><select id="u-role"><option value="admin">admin</option><option value="supervisor">supervisor</option><option value="domiciliario1">domiciliario1</option><option value="domiciliario2">domiciliario2</option></select></div><div><label>Activo</label><select id="u-active"><option value="true">Sí</option><option value="false">No</option></select></div><div class="form-actions" style="align-self:end"><button class="btn green" type="submit">Guardar perfil</button><button class="btn secondary hidden" id="u-cancel" type="button">Cancelar</button></div></form></div>
+    <div class="card" style="margin-top:15px"><div class="section-head-row"><h3 class="section-title">Perfiles registrados</h3><span class="badge blue">Editable</span></div><div class="table-wrap"><table class="table"><thead><tr><th>UID</th><th>Nombre</th><th>Email</th><th>Rol</th><th>Activo</th><th>Acción</th></tr></thead><tbody>${users.map(u => `<tr><td class="td-mono">${esc(u.id)}</td><td>${esc(u.nombre || "")}</td><td>${esc(u.email || "")}</td><td><span class="badge blue">${esc(u.rol || "")}</span></td><td>${u.activo === false || u.activo === "false" ? "No" : "Sí"}</td><td><button class="btn secondary edit-user" data-id="${esc(u.id)}">Editar</button></td></tr>`).join("")}</tbody></table></div></div>`;
+
+  const form = $("#user-form");
+  const cancel = $("#u-cancel");
+  const clear = () => { form.reset(); $("#u-uid").value = ""; $("#u-email").value = ""; $("#u-active").value = "true"; cancel.classList.add("hidden"); };
+  document.querySelectorAll(".edit-user").forEach(button => button.onclick = () => {
+    const u = users.find(x => x.id === button.dataset.id); if (!u) return;
+    $("#u-uid").value = u.id; $("#u-name").value = u.nombre || ""; $("#u-email").value = u.email || ""; $("#u-role").value = u.rol || "domiciliario1"; $("#u-active").value = (u.activo === false || u.activo === "false") ? "false" : "true"; cancel.classList.remove("hidden"); form.scrollIntoView({ behavior: "smooth", block: "center" });
+  });
+  cancel.onclick = clear;
+  form.onsubmit = async e => { e.preventDefault(); const uid = $("#u-uid").value; if (!uid) return toast("Selecciona un perfil registrado."); try { await saveUser(uid, { nombre: $("#u-name").value.trim(), email: $("#u-email").value.trim(), rol: $("#u-role").value, activo: $("#u-active").value === "true" }); toast("Perfil guardado"); await usuariosView(); } catch (err) { toast("No se pudo guardar: " + err.message); } };
+}
+
+$("#login-form").onsubmit = async e => { e.preventDefault(); const error = $("#login-error"); error.classList.add("hidden"); try { await login($("#login-email").value.trim(), $("#login-password").value); } catch (err) { error.textContent = humanAuthError(err); error.classList.remove("hidden"); } };
+$("#forgot-password").onclick = async () => { const email = $("#login-email").value.trim(); if (!email) return toast("Escribe primero tu correo."); try { await resetPassword(email); toast("Correo de restablecimiento enviado."); } catch (e) { toast(e.message); } };
+$("#logout").onclick = async () => { stopDomiciliaryGps(); await logout(); };
+$("#menu-toggle").onclick = () => $("#sidebar")?.classList.toggle("open");
+window.addEventListener("online", setNetworkStatus); window.addEventListener("offline", setNetworkStatus); setNetworkStatus();
+
+function humanAuthError(e) { const c = e?.code || ""; if (c.includes("invalid-credential")) return "Correo o contraseña incorrectos."; if (c.includes("too-many-requests")) return "Demasiados intentos. Intenta más tarde."; if (c.includes("user-disabled")) return "Usuario deshabilitado."; return e?.message || "No fue posible iniciar sesión."; }
+
+watchAuth(async user => {
+  if (!user) { profile = null; stopDomiciliaryGps(); $("#app").classList.add("hidden"); $("#login-screen").classList.remove("hidden"); return; }
+  try {
+    profile = await getCurrentProfile(user);
+    $("#login-screen").classList.add("hidden"); $("#app").classList.remove("hidden");
+    $("#user-name").textContent = displayName(profile); $("#user-role").textContent = canonicalRole(profile.rol); setNetworkStatus();
+    const initialRoute = isDomiciliario(profile.rol) ? "turno" : "dashboard";
+    renderNav(initialRoute); await route(initialRoute);
+  } catch (e) {
+    await logout(); $("#login-error").textContent = e.message; $("#login-error").classList.remove("hidden");
+  }
+});
