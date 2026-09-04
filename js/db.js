@@ -81,9 +81,20 @@ export async function addEntrega(data) {
   return ref;
 }
 
+// En "Mi turno" solo deben aparecer los pedidos del turno actualmente activo.
+// Los documentos históricos no se eliminan: siguen disponibles para Entregas y Nómina.
 export async function getOwnEntregas(uid) {
-  const s = await getDocs(query(col("entregas"), where("usuarioId", "==", uid), orderBy("timestamp", "desc"), limit(100)));
-  return s.docs.map(d => ({ id: d.id, ...d.data() }));
+  const activeTurn = await getActiveTurno(uid);
+  if (!activeTurn?.id) return [];
+
+  const s = await getDocs(query(col("entregas"), where("turnoId", "==", activeTurn.id), limit(500)));
+  return s.docs
+    .map(d => ({ id: d.id, ...d.data() }))
+    .sort((a, b) => {
+      const da = a.timestamp?.toDate ? a.timestamp.toDate().getTime() : new Date(a.timestamp || 0).getTime();
+      const db = b.timestamp?.toDate ? b.timestamp.toDate().getTime() : new Date(b.timestamp || 0).getTime();
+      return db - da;
+    });
 }
 
 export async function getEntregasByDate(start, end, uid = null) {
