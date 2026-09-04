@@ -10,6 +10,7 @@ const today = () => new Date().toISOString().slice(0, 10);
 const toast = message => { const t = $("#toast"); if (!t) return; t.textContent = message; t.classList.add("show"); clearTimeout(t._timer); t._timer = setTimeout(() => t.classList.remove("show"), 2800); };
 
 let profiles = [];
+let pendingImportRows = [];
 
 function displayName(user) { return user?.nombre || user?.email?.split("@")[0] || user?.id || "Domiciliario"; }
 function isDomi(user) { return ["domiciliario", "domiciliario1", "domiciliario2"].includes(user?.rol); }
@@ -20,7 +21,12 @@ function parseNumber(value, field, rowNumber, required = false) {
     if (required) throw new Error(`Fila ${rowNumber}: ${field} es obligatorio.`);
     return null;
   }
-  const n = Number(String(value).replace(/[$.\s]/g, "").replace(",", "."));
+  const raw = String(value).trim();
+  const decimalField = ["distancia_km", "lat", "lng"].includes(field);
+  const normalized = decimalField
+    ? raw.replace(/\s/g, "").replace(",", ".")
+    : raw.replace(/[$.\s]/g, "").replace(",", ".");
+  const n = Number(normalized);
   if (!Number.isFinite(n)) throw new Error(`Fila ${rowNumber}: ${field} no es numérico.`);
   return n;
 }
@@ -146,12 +152,13 @@ async function importFile(file) {
   if (!window.XLSX) throw new Error("No se cargó el módulo de Excel. Recarga la aplicación.");
   const data = await file.arrayBuffer();
   const wb = XLSX.read(data, { type: "array", cellDates: true });
+  if (!wb.SheetNames.length) throw new Error("El archivo no contiene hojas.");
   const sheet = wb.Sheets[wb.SheetNames[0]];
   const raw = XLSX.utils.sheet_to_json(sheet, { defval: "" });
   if (!raw.length) throw new Error("El archivo no contiene registros.");
   const rows = raw.map((r, i) => normalizeRow(r, i + 2));
+  pendingImportRows = rows;
   renderRowsPreview(rows);
-  $("#svc-import").dataset.rows = JSON.stringify(rows);
   $("#svc-import-action").disabled = false;
   toast(`Archivo leído: ${rows.length} registros listos para importar.`);
 }
@@ -167,10 +174,9 @@ async function saveManual() {
 }
 
 async function saveImport() {
-  const rows = JSON.parse($("#svc-import").dataset.rows || "[]");
-  if (!rows.length) throw new Error("Primero selecciona un archivo válido.");
+  if (!pendingImportRows.length) throw new Error("Primero selecciona un archivo válido.");
   const adminProfile = await getCurrentProfile(auth.currentUser);
-  const payloads = rows.map((row, i) => toEntrega(row, i + 2, adminProfile, "admin_importacion"));
+  const payloads = pendingImportRows.map((row, i) => toEntrega(row, i + 2, adminProfile, "admin_importacion"));
   for (let start = 0; start < payloads.length; start += 450) {
     const batch = writeBatch(db);
     payloads.slice(start, start + 450).forEach(payload => batch.set(doc(collection(db, "entregas")), payload));
@@ -178,7 +184,10 @@ async function saveImport() {
   }
   await addDoc(collection(db, "auditoria"), { accion: "importar_domicilios_admin", usuarioId: adminProfile.uid, usuarioNombre: adminProfile.nombre || adminProfile.email, registros: payloads.length, archivo: $("#svc-file")?.files?.[0]?.name || null, fecha: serverTimestamp() });
   toast(`${payloads.length} domicilios importados correctamente.`);
-  $("#svc-import").dataset.rows = "[]"; $("#svc-import-action").disabled = true; $("#svc-file").value = ""; renderRowsPreview([]);
+  pendingImportRows = [];
+  $("#svc-import-action").disabled = true;
+  $("#svc-file").value = "";
+  renderRowsPreview([]);
 }
 
 async function renderPage() {
@@ -198,9 +207,10 @@ async function renderPage() {
         <div style="grid-column:1/-1"><label>Observaciones</label><textarea id="svc-obs" rows="2"></textarea></div>
         <div style="grid-column:1/-1"><button class="btn green" type="submit">Agregar domicilio</button></div>
       </form></div>`;
+  pendingImportRows = [];
   await loadProfiles();
   $("#svc-template").onclick = downloadTemplate;
-  $("#svc-file").onchange = async e => { try { await importFile(e.target.files[0]); } catch (error) { toast(error.message); renderRowsPreview([]); } };
+  $("#svc-file").onchange = async e => { try { await importFile(e.target.files[0]); } catch (error) { pendingImportRows = []; toast(error.message); $("#svc-import-action").disabled = true; renderRowsPreview([]); } };
   $("#svc-import-action").onclick = async () => { const b = $("#svc-import-action"); b.disabled = true; b.textContent = "Importando…"; try { await saveImport(); } catch (error) { toast("No se importó el archivo: " + error.message); b.disabled = false; b.textContent = "Importar domicilios"; } finally { if (b) b.textContent = "Importar domicilios"; } };
   $("#svc-manual").onsubmit = async e => { e.preventDefault(); const b = e.submitter; b.disabled = true; b.textContent = "Guardando…"; try { await saveManual(); } catch (error) { toast("No se pudo agregar: " + error.message); } finally { b.disabled = false; b.textContent = "Agregar domicilio"; } };
 }
