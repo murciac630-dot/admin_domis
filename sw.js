@@ -12,6 +12,7 @@ const SHELL = [
   "./js/upgrades.js?v=26",
   "./js/admin_services.js?v=3",
   "./js/admin_cleanup.js?v=2",
+  "./js/nomina_turnos.js?v=1",
   "./manifest.webmanifest"
 ];
 
@@ -32,5 +33,5 @@ self.addEventListener("fetch", event => {
     const copy = response.clone();
     caches.open(CACHE).then(cache => cache.put(request, copy));
     return response;
-  }).catch(() => caches.match("./index.html"))));
+  }).catch(() => caches.match("./index.html")));
 });
