@@ -31,6 +31,26 @@ function parseNumber(value, field, rowNumber, required = false) {
   return n;
 }
 
+function normalizeTime(value, field = "hora") {
+  if (value === "" || value == null) return "";
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return `${String(value.getHours()).padStart(2, "0")}:${String(value.getMinutes()).padStart(2, "0")}`;
+  if (typeof value === "number" && window.XLSX?.SSF) {
+    const parsed = XLSX.SSF.parse_date_code(value);
+    if (parsed && Number.isFinite(parsed.H) && Number.isFinite(parsed.M)) return `${String(parsed.H).padStart(2, "0")}:${String(parsed.M).padStart(2, "0")}`;
+  }
+  const raw = String(value).trim();
+  if (!raw) return "";
+  const match = raw.match(/^(\d{1,2}):(\d{2})(?::\d{2})?\s*(?:a\.?\s*m\.?|p\.?\s*m\.?)?$/i);
+  if (!match) throw new Error(`${field} inválida: ${raw}`);
+  let hour = Number(match[1]);
+  const minute = Number(match[2]);
+  const lower = raw.toLowerCase();
+  if (lower.includes("p") && hour < 12) hour += 12;
+  if (lower.includes("a") && hour === 12) hour = 0;
+  if (hour > 23 || minute > 59) throw new Error(`${field} inválida: ${raw}`);
+  return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+}
+
 function dateString(value) {
   if (value instanceof Date && !Number.isNaN(value.getTime())) {
     const y = value.getFullYear(); const m = String(value.getMonth() + 1).padStart(2, "0"); const d = String(value.getDate()).padStart(2, "0");
@@ -63,13 +83,15 @@ function buildTimestamp(fecha, hora) {
 
 function normalizeRow(raw, rowNumber) {
   const get = (...names) => {
-    const key = Object.keys(raw).find(k => names.some(n => String(k).trim().toLowerCase() === n));
+    const normalizedNames = names.map(n => String(n).trim().toLowerCase());
+    const key = Object.keys(raw).find(k => normalizedNames.includes(String(k).trim().toLowerCase()));
     return key == null ? "" : raw[key];
   };
   const uid = String(get("domiciliario_uid", "uid", "usuario_id")).trim();
   const email = String(get("domiciliario_email", "email", "usuario_email")).trim().toLowerCase();
   const fecha = get("fecha", "date");
-  const hora = get("hora", "time") || "12:00";
+  const hora = normalizeTime(get("hora", "time"), "hora") || "12:00";
+  const horaInicioTurno = normalizeTime(get("horaInicioTurno", "hora_inicio_turno", "hora inicio turno", "inicio_turno"), "horaInicioTurno");
   const cliente = String(get("cliente", "nombre_cliente")).trim();
   const empresa = String(get("empresa", "servicio", "empresa_servicio")).trim() || "Ferco Farma";
   const valorDomicilio = parseNumber(get("valor_domicilio", "valor_domicilio_cop", "tarifa"), "valor_domicilio", rowNumber, true);
@@ -82,7 +104,7 @@ function normalizeRow(raw, rowNumber) {
   if (!cliente) throw new Error(`Fila ${rowNumber}: cliente es obligatorio.`);
   if (!uid && !email) throw new Error(`Fila ${rowNumber}: indica domiciliario_uid o domiciliario_email.`);
   if (valorDomicilio < 0) throw new Error(`Fila ${rowNumber}: valor_domicilio no puede ser negativo.`);
-  return { uid, email, fecha, hora, cliente, empresa, valorDomicilio: Math.round(valorDomicilio), distancia, total: Math.round(total), lat, lng, medio, observaciones };
+  return { uid, email, fecha, hora, horaInicioTurno, cliente, empresa, valorDomicilio: Math.round(valorDomicilio), distancia, total: Math.round(total), lat, lng, medio, observaciones };
 }
 
 function resolveUser(row, rowNumber) {
@@ -103,6 +125,7 @@ function toEntrega(row, rowNumber, adminProfile, origenRegistro) {
     creadoPorNombre: adminProfile.nombre || adminProfile.email || adminProfile.uid,
     origenRegistro,
     turnoId: null,
+    horaInicioTurno: row.horaInicioTurno || null,
     empresa: row.empresa,
     cliente: row.cliente,
     lat: row.lat,
@@ -133,18 +156,18 @@ async function loadProfiles() {
 
 function downloadTemplate() {
   if (!window.XLSX) return toast("No se cargó el módulo de Excel. Recarga la aplicación e inténtalo de nuevo.");
-  const headers = ["fecha", "hora", "domiciliario_uid", "domiciliario_email", "cliente", "empresa", "valor_domicilio", "distancia_km", "total_cobrado", "medio_pago", "lat", "lng", "observaciones"];
-  const ws = XLSX.utils.json_to_sheet([{ fecha: today(), hora: "12:00", domiciliario_uid: "", domiciliario_email: "domi1@fercofarma.com", cliente: "Ejemplo", empresa: "Ferco Farma", valor_domicilio: 10000, distancia_km: 2.5, total_cobrado: 0, medio_pago: "efectivo", lat: "", lng: "", observaciones: "Eliminar esta fila de ejemplo antes de importar" }], { header: headers });
+  const headers = ["fecha", "hora", "domiciliario_uid", "domiciliario_email", "cliente", "empresa", "valor_domicilio", "distancia_km", "total_cobrado", "medio_pago", "lat", "lng", "observaciones", "horaInicioTurno"];
+  const ws = XLSX.utils.json_to_sheet([{ fecha: today(), hora: "12:00", domiciliario_uid: "", domiciliario_email: "domi1@fercofarma.com", cliente: "Ejemplo", empresa: "Ferco Farma", valor_domicilio: 10000, distancia_km: 2.5, total_cobrado: 0, medio_pago: "efectivo", lat: "", lng: "", observaciones: "Eliminar esta fila de ejemplo antes de importar", horaInicioTurno: "18:00" }], { header: headers });
   ws["!cols"] = headers.map(h => ({ wch: Math.max(16, h.length + 2) }));
-  const info = [["PLANTILLA · CARGA DE DOMICILIOS"],["Obligatorios: fecha, domiciliario_uid o domiciliario_email, cliente, valor_domicilio."],["fecha: AAAA-MM-DD. hora: HH:MM. Si hora queda vacía se usa 12:00."],["valor_domicilio queda congelado para nómina y no se recalcula después."],["No necesitas turno_id: estos registros quedan como históricos administrativos."],["La fila de ejemplo debe eliminarse antes de importar."],["El domiciliario se resuelve por UID o por correo. El UID tiene prioridad."]];
-  const wi = XLSX.utils.aoa_to_sheet(info); wi["!cols"] = [{ wch: 105 }];
+  const info = [["PLANTILLA · CARGA DE DOMICILIOS"],["Obligatorios: fecha, domiciliario_uid o domiciliario_email, cliente, valor_domicilio."],["fecha: AAAA-MM-DD. hora: HH:MM. horaInicioTurno: HH:MM del inicio del turno al que corresponde el domicilio."],["valor_domicilio queda congelado para nómina y no se recalcula después."],["No necesitas turno_id: estos registros quedan como históricos administrativos."],["La fila de ejemplo debe eliminarse antes de importar."],["El domiciliario se resuelve por UID o por correo. El UID tiene prioridad."],["horaInicioTurno también acepta encabezados equivalentes como hora_inicio_turno."]];
+  const wi = XLSX.utils.aoa_to_sheet(info); wi["!cols"] = [{ wch: 110 }];
   const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, "Domicilios"); XLSX.utils.book_append_sheet(wb, wi, "Instrucciones");
   XLSX.writeFile(wb, "plantilla_carga_domicilios.xlsx");
 }
 
 function renderRowsPreview(rows) {
   const preview = $("#svc-preview"); if (!preview) return;
-  preview.innerHTML = rows.length ? `<div class="section-head-row"><h3 class="section-title">Vista previa</h3><span class="badge blue">${rows.length} registros</span></div><div class="table-wrap"><table class="table"><thead><tr><th>Fecha</th><th>Domiciliario</th><th>Cliente</th><th>Empresa</th><th>Tarifa</th><th>Total cobrado</th></tr></thead><tbody>${rows.slice(0, 100).map(r => `<tr><td>${esc(dateString(r.fecha))} ${esc(r.hora || "12:00")}</td><td>${esc(r.uid || r.email)}</td><td>${esc(r.cliente)}</td><td>${esc(r.empresa)}</td><td>${money(r.valorDomicilio)}</td><td>${money(r.total)}</td></tr>`).join("")}</tbody></table></div>${rows.length > 100 ? `<p class="form-note">Mostrando 100 de ${rows.length}. La importación procesará todos.</p>` : ""}` : `<div class="empty">Selecciona un archivo para ver la vista previa.</div>`;
+  preview.innerHTML = rows.length ? `<div class="section-head-row"><h3 class="section-title">Vista previa</h3><span class="badge blue">${rows.length} registros</span></div><div class="table-wrap"><table class="table"><thead><tr><th>Fecha</th><th>Hora</th><th>Inicio turno</th><th>Domiciliario</th><th>Cliente</th><th>Empresa</th><th>Tarifa</th><th>Total cobrado</th></tr></thead><tbody>${rows.slice(0, 100).map(r => `<tr><td>${esc(dateString(r.fecha))}</td><td>${esc(r.hora || "12:00")}</td><td>${esc(r.horaInicioTurno || "—")}</td><td>${esc(r.uid || r.email)}</td><td>${esc(r.cliente)}</td><td>${esc(r.empresa)}</td><td>${money(r.valorDomicilio)}</td><td>${money(r.total)}</td></tr>`).join("")}</tbody></table></div>${rows.length > 100 ? `<p class="form-note">Mostrando 100 de ${rows.length}. La importación procesará todos.</p>` : ""}` : `<div class="empty">Selecciona un archivo para ver la vista previa.</div>`;
 }
 
 async function importFile(file) {
