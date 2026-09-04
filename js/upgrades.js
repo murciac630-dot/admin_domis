@@ -1,11 +1,13 @@
-import { getAllTracking } from "./db.js";
+import { getAllTracking, getEntregasByDate, getUsers } from "./db.js";
 import { getCurrentGps } from "./gps.js";
 import { getOperationConfig, saveOperationConfig, calculateDeliveryPricing, renderTrackingMap } from "./maps.js";
 import { auth } from "./firebase.js";
+import { Timestamp } from "https://www.gstatic.com/firebasejs/12.1.0/firebase-firestore.js";
 
 let mapInstance = null;
 let previewTimer = null;
 let loadedConfig = null;
+let payrollEnhancing = false;
 
 const $ = selector => document.querySelector(selector);
 
@@ -23,6 +25,19 @@ function showToast(message) {
   clearTimeout(element._timer);
   element._timer = setTimeout(() => element.classList.remove("show"), 2800);
 }
+function dateInputToTimestamp(value, end = false) {
+  return Timestamp.fromDate(new Date(value + (end ? "T23:59:59" : "T00:00:00")));
+}
+function formatDate(value) {
+  if (!value) return "—";
+  const d = value?.toDate ? value.toDate() : new Date(value);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleString("es-CO", { dateStyle: "short", timeStyle: "short" });
+}
+function canonicalRole(role) {
+  return ["domiciliario", "domiciliario1", "domiciliario2"].includes(role) ? "domiciliario" : role;
+}
+function isDomiciliario(role) { return canonicalRole(role) === "domiciliario"; }
 
 async function enhanceGpsPage() {
   const placeholder = $(".map-placeholder");
@@ -155,11 +170,91 @@ async function enhanceDeliveryForm() {
   clearInterval(previewTimer); previewTimer = setInterval(refresh, 10000);
 }
 
+async function enhancePayroll() {
+  const result = $("#nresult");
+  const table = result?.querySelector("table");
+  if (!result || !table || payrollEnhancing) return;
+  if (table.dataset.detailsEnhanced === "true") return;
+  payrollEnhancing = true;
+  try {
+    const users = await getUsers();
+    const domiciliarios = users.filter(u => isDomiciliario(u.rol) && u.activo !== false);
+    const rows = [...table.querySelectorAll("tbody tr")];
+    const headRow = table.querySelector("thead tr");
+    if (!headRow) return;
+
+    const actionHeader = document.createElement("th");
+    actionHeader.textContent = "Detalle";
+    headRow.appendChild(actionHeader);
+
+    rows.forEach((row, index) => {
+      const user = domiciliarios[index];
+      const cell = document.createElement("td");
+      if (user) {
+        const button = document.createElement("button");
+        button.className = "btn secondary payroll-detail";
+        button.textContent = "Ver domicilios";
+        button.dataset.uid = user.id;
+        button.dataset.name = displayNameForPayroll(user);
+        cell.appendChild(button);
+      } else {
+        cell.textContent = "—";
+      }
+      row.appendChild(cell);
+    });
+
+    const detail = document.createElement("div");
+    detail.id = "payroll-detail";
+    detail.className = "card";
+    detail.style.marginTop = "15px";
+    detail.innerHTML = `<div class="empty">Selecciona “Ver domicilios” para consultar exactamente los registros incluidos en la liquidación.</div>`;
+    result.appendChild(detail);
+
+    result.querySelectorAll(".payroll-detail").forEach(button => {
+      button.addEventListener("click", () => showPayrollDetails(button.dataset.uid, button.dataset.name));
+    });
+    table.dataset.detailsEnhanced = "true";
+  } catch (error) {
+    showToast("No se pudo preparar el detalle de nómina: " + error.message);
+  } finally {
+    payrollEnhancing = false;
+  }
+}
+
+function displayNameForPayroll(user) {
+  return user?.nombre || user?.email?.split("@")[0] || user?.id || "Domiciliario";
+}
+
+async function showPayrollDetails(uid, name) {
+  const detail = $("#payroll-detail");
+  if (!detail) return;
+  const start = $("#n1")?.value;
+  const end = $("#n2")?.value;
+  if (!start || !end) return;
+  detail.innerHTML = `<div class="empty">Cargando domicilios de ${esc(name)}…</div>`;
+  try {
+    const deliveries = await getEntregasByDate(dateInputToTimestamp(start), dateInputToTimestamp(end, true), uid);
+    const valid = deliveries.filter(x => x.estado !== "anulado");
+    const total = valid.reduce((sum, x) => sum + Number(x.valorDomicilioCongelado ?? x.valorDomicilio ?? 0), 0);
+    detail.innerHTML = `<div class="section-head-row"><div><h3 class="section-title">Domicilios incluidos · ${esc(name)}</h3><div class="muted">Rango: ${esc(start)} al ${esc(end)} · Solo registros no anulados</div></div><span class="badge green">${valid.length} domicilios · ${money(total)}</span></div>
+      ${valid.length ? `<div class="table-wrap"><table class="table"><thead><tr><th>Fecha</th><th>Cliente</th><th>Empresa</th><th>Distancia</th><th>Tarifa</th><th>Pago domiciliario</th></tr></thead><tbody>${valid.map(p => {
+        const distance = p.distanciaTarifableKm != null ? `${Number(p.distanciaTarifableKm).toFixed(2)} km` : "—";
+        const value = Number(p.valorDomicilioCongelado ?? p.valorDomicilio ?? 0);
+        const type = p.tipoTarifa === "especial" ? `Especial${p.tarifaMotivo ? ` · ${esc(p.tarifaMotivo)}` : ""}` : (Number(p.distanciaTarifableKm) > 3.5 ? "$15.000" : "$10.000");
+        return `<tr><td>${esc(formatDate(p.timestamp))}</td><td>${esc(p.cliente)}</td><td>${esc(p.empresa)}</td><td>${esc(distance)}</td><td>${type}</td><td><b>${money(value)}</b></td></tr>`;
+      }).join("")}</tbody></table></div>` : `<div class="empty">No hay domicilios válidos para este domiciliario en el rango seleccionado.</div>`}`;
+    detail.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  } catch (error) {
+    detail.innerHTML = `<div class="error">No se pudo cargar el detalle: ${esc(error.message)}</div>`;
+  }
+}
+
 const observer = new MutationObserver(() => {
   ensureConfigButton();
   enhanceGpsPage();
   enhanceDeliveryForm();
+  enhancePayroll();
 });
 observer.observe(document.body, { childList: true, subtree: true });
 
-setTimeout(() => { ensureConfigButton(); enhanceGpsPage(); enhanceDeliveryForm(); }, 300);
+setTimeout(() => { ensureConfigButton(); enhanceGpsPage(); enhanceDeliveryForm(); enhancePayroll(); }, 300);
