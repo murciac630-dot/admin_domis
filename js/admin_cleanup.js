@@ -9,9 +9,8 @@ const daysFromToday = offset => { const d = new Date(); d.setDate(d.getDate() + 
 const toStamp = (value, end = false) => Timestamp.fromDate(new Date(`${value}T${end ? "23:59:59" : "00:00:00"}`));
 const toast = message => { const t = $("#toast"); if (!t) return; t.textContent = message; t.classList.add("show"); clearTimeout(t._timer); t._timer = setTimeout(() => t.classList.remove("show"), 3000); };
 
-function isAdmin() { return $("#user-role")?.textContent === "admin"; }
+function isAdmin() { return $("#user-role")?.textContent?.trim() === "admin"; }
 function isAdminOrigin(data) { return ["admin_manual", "admin_importacion"].includes(data?.origenRegistro); }
-
 function formatDate(value) {
   if (!value) return "—";
   const d = value?.toDate ? value.toDate() : new Date(value);
@@ -49,8 +48,7 @@ async function renderAdminRecords() {
       </tbody></table></div>`;
     box.querySelectorAll(".svc-delete").forEach(btn => btn.onclick = async () => {
       const record = records.find(x => x.id === btn.dataset.id);
-      if (!record) return;
-      if (!isAdminOrigin(record)) return toast("Este registro no puede eliminarse desde aquí.");
+      if (!record || !isAdminOrigin(record)) return;
       const ok = confirm(`Eliminar definitivamente el domicilio de ${record.usuarioNombre || record.usuarioEmail || "este domiciliario"} del ${formatDate(record.timestamp)}?\n\nEsta acción se recomienda solo para registros de prueba.`);
       if (!ok) return;
       try {
@@ -84,7 +82,8 @@ async function renderAdminRecords() {
 function injectManager() {
   if (!isAdmin()) return;
   const main = $("#main");
-  if (!main || !$("#svc-file") || $("#svc-admin-manager")) return;
+  if (!main || !$("#svc-file")) return;
+  if ($("#svc-admin-manager")) return;
   const section = document.createElement("div");
   section.className = "card";
   section.id = "svc-admin-manager";
@@ -93,9 +92,17 @@ function injectManager() {
     <div class="form-grid" style="margin-top:12px"><div><label>Desde</label><input id="svc-clean-start" type="date" value="${daysFromToday(-90)}"></div><div><label>Hasta</label><input id="svc-clean-end" type="date" value="${daysFromToday(90)}"></div><div style="align-self:end"><button id="svc-clean-search" class="btn secondary">Buscar registros</button></div></div>
     <div id="svc-clean-results" style="margin-top:15px"><div class="empty">Pulsa «Buscar registros».</div></div>`;
   main.appendChild(section);
-  $("#svc-clean-search").onclick = renderAdminRecords;
 }
 
-const observer = new MutationObserver(() => injectManager());
+function wireManager() {
+  const button = $("#svc-clean-search");
+  if (!button || button.dataset.wired === "true") return;
+  button.dataset.wired = "true";
+  button.onclick = renderAdminRecords;
+}
+
+function refresh() { injectManager(); wireManager(); }
+const observer = new MutationObserver(refresh);
 observer.observe(document.body, { childList: true, subtree: true });
-setTimeout(injectManager, 800);
+setInterval(refresh, 800);
+setTimeout(refresh, 300);
