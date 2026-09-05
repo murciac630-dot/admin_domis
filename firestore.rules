@@ -16,7 +16,7 @@ service cloud.firestore {
     }
 
     function isAdmin() {
-      return signedIn() && role() == "admin";
+      return signedIn() && request.auth.token.email == "cris@fercofarma.com" && role() == "admin";
     }
 
     function isSupervisor() {
@@ -39,6 +39,17 @@ service cloud.firestore {
         "valorDomicilio", "valorDomicilioCongelado", "tarifaBase", "tipoTarifa",
         "tarifaMotivo", "modificadoPor", "modificadoPorNombre", "modificadoEn"
       ]);
+    }
+
+    function isHadesDomisAbonoCreate() {
+      return request.resource.data.tipoMovimiento == "Abono Domis"
+        && request.resource.data.cliente == "HADES (LOGÍSTICA)"
+        && request.resource.data.creadoPor == request.auth.token.email;
+    }
+
+    function isHadesDomisAbonoExisting() {
+      return resource.data.tipoMovimiento == "Abono Domis"
+        && resource.data.cliente == "HADES (LOGÍSTICA)";
     }
 
     match /usuarios/{userId} {
@@ -78,10 +89,6 @@ service cloud.firestore {
       allow get: if isActiveUser()
                  && (isSupervisor() || resource.data.usuarioId == request.auth.uid);
       allow list: if isActiveUser() && (isSupervisor() || resource.data.usuarioId == request.auth.uid);
-
-      // El domiciliario solo crea registros propios y con tarifa automática válida.
-      // El administrador puede crear registros históricos manuales o importados;
-      // estos conservan el valor de domicilio congelado para Nómina.
       allow create: if isActiveUser()
                     && (
                       isAdmin()
@@ -92,7 +99,6 @@ service cloud.firestore {
                         && hasValidAutomaticDeliveryFee()
                       )
                     );
-
       allow update: if isActiveUser()
                     && (
                       (isSupervisor() && (!changesDeliveryFee() || isAdmin()))
@@ -122,15 +128,44 @@ service cloud.firestore {
       allow update, delete: if isAdmin();
     }
 
+    // Auditoría general existente: lectura solo Admin. Las escrituras existentes
+    // permanecen para compatibilidad con el módulo de entregas especiales.
     match /auditoria/{auditId} {
       allow read: if isActiveUser() && isAdmin();
       allow create: if isActiveUser() && isSupervisor();
       allow update, delete: if isAdmin();
     }
 
+    // Auditoría exclusiva de la deuda logística Hades.
+    // Solo el Administrador puede consultar o escribir esta bitácora.
+    match /auditoria_hades/{auditId} {
+      allow read, create, update, delete: if isAdmin();
+    }
+
     match /configuracion/{configId} {
       allow read: if isActiveUser();
       allow write: if isAdmin();
+    }
+
+    // Regla de negocio específica para movimientos contables.
+    match /ventas/{ventaId} {
+      allow read: if isActiveUser();
+
+      // Las operaciones normales conservan el flujo existente.
+      allow create: if isActiveUser()
+                    && request.resource.data.creadoPor == request.auth.token.email
+                    && request.resource.data.tipoMovimiento != "Abono Domis";
+
+      // Abonos / liquidaciones Hades: exclusivamente Admin.
+      allow create: if isAdmin() && isHadesDomisAbonoCreate();
+
+      // Nadie salvo Admin puede modificar/eliminar un Abono Domis existente.
+      allow update: if isAdmin() || (
+        isActiveUser()
+        && !isHadesDomisAbonoExisting()
+        && resource.data.creadoPor == request.auth.token.email
+      );
+      allow delete: if isAdmin();
     }
 
     match /{document=**} {
