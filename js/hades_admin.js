@@ -18,6 +18,62 @@ function toast(message) {
   t.textContent = message; t.classList.add("show"); clearTimeout(t._timer); t._timer = setTimeout(() => t.classList.remove("show"), 3000);
 }
 
+// Defensa de interfaz para versiones anteriores que todavía puedan contener
+// los controles inline #btn-abonar-hades-hades / #btn-liquidar-hades.
+// La seguridad real sigue estando en Firestore (firestore.rules).
+let legacyAbonoOriginal = null;
+let legacyAbonoGuarded = null;
+let legacyLiquidarOriginal = null;
+let legacyLiquidarGuarded = null;
+
+function enforceLegacyHadesControls() {
+  const admin = isAdmin();
+  const abonoButtons = [
+    $("#btn-abonar-hades-hades"),
+    $("#btn-abonar-hades-admin")
+  ].filter(Boolean);
+  const liquidar = $("#btn-liquidar-hades");
+
+  abonoButtons.forEach(button => {
+    if (admin) {
+      button.style.display = "flex";
+      button.disabled = false;
+    } else {
+      button.style.display = "none";
+      button.disabled = true;
+      button.removeAttribute("onclick");
+    }
+  });
+
+  if (liquidar) {
+    liquidar.style.display = admin ? "flex" : "none";
+    liquidar.disabled = !admin;
+    if (!admin) liquidar.removeAttribute("onclick");
+  }
+
+  const originalAbono = window.abrirModalAbonoHades;
+  if (typeof originalAbono === "function" && !originalAbono.__hadesGuarded) {
+    legacyAbonoOriginal = originalAbono;
+    legacyAbonoGuarded = (...args) => {
+      if (!isAdmin()) return toast("Acción exclusiva del Administrador.");
+      return legacyAbonoOriginal(...args);
+    };
+    legacyAbonoGuarded.__hadesGuarded = true;
+    window.abrirModalAbonoHades = legacyAbonoGuarded;
+  }
+
+  const originalLiquidar = window.liquidarDomisHades;
+  if (typeof originalLiquidar === "function" && !originalLiquidar.__hadesGuarded) {
+    legacyLiquidarOriginal = originalLiquidar;
+    legacyLiquidarGuarded = (...args) => {
+      if (!isAdmin()) return toast("Acción exclusiva del Administrador.");
+      return legacyLiquidarOriginal(...args);
+    };
+    legacyLiquidarGuarded.__hadesGuarded = true;
+    window.liquidarDomisHades = legacyLiquidarGuarded;
+  }
+}
+
 async function render() {
   if (!isAdmin()) return;
   const main = $("#main");
@@ -87,6 +143,9 @@ window.abrirAuditoriaHades = async () => {
   await render();
 };
 
+setInterval(enforceLegacyHadesControls, 800);
+enforceLegacyHadesControls();
+
 setTimeout(() => {
   if (isAdmin() && document.querySelector("#nav")) {
     const nav = $("#nav");
@@ -102,6 +161,7 @@ setTimeout(() => {
 }, 500);
 
 const observer = new MutationObserver(() => {
+  enforceLegacyHadesControls();
   if (!isAdmin()) return;
   const nav = $("#nav");
   if (nav && !nav.querySelector("[data-hades-audit]")) {
