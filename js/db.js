@@ -4,6 +4,26 @@ import { addDoc, collection, doc, getDoc, getDocs, limit, orderBy, query, server
 
 export const col = name => collection(db, name);
 
+const ADMIN_EMAIL = "cris@fercofarma.com";
+
+function requireAdmin(user) {
+  const email = String(user?.email || "").trim().toLowerCase();
+  if (email !== ADMIN_EMAIL) throw new Error("Acción exclusiva del Administrador.");
+}
+
+function isHadesDomisMovement(data) {
+  return data?.tipoMovimiento === "Abono Domis" && data?.cliente === "HADES (LOGÍSTICA)";
+}
+
+function buildHadesAudit(data) {
+  return {
+    ...data,
+    modulo: "hades_domis",
+    creadoEn: serverTimestamp(),
+    usuarioEmail: ADMIN_EMAIL
+  };
+}
+
 export async function getUsers() {
   const s = await getDocs(col("usuarios"));
   return s.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => String(a.nombre || a.email || a.id).localeCompare(String(b.nombre || b.email || b.id), "es"));
@@ -165,6 +185,80 @@ export async function getAllTracking() {
   return s.docs.map(d => ({ id: d.id, ...d.data() }));
 }
 
-export async function audit(data) {
+export async function audit(data, user = null) {
+  if (user) requireAdmin(user);
   return addDoc(col("auditoria"), { ...data, fecha: serverTimestamp() });
+}
+
+// =============================
+// DEUDA HADES: SOLO ADMIN
+// =============================
+export async function getHadesDomisAudit(user) {
+  requireAdmin(user);
+  const snap = await getDocs(col("auditoria_hades"));
+  return snap.docs
+    .map(d => ({ id: d.id, ...d.data() }))
+    .sort((a, b) => {
+      const ta = a.creadoEn?.toDate ? a.creadoEn.toDate().getTime() : 0;
+      const tb = b.creadoEn?.toDate ? b.creadoEn.toDate().getTime() : 0;
+      return tb - ta;
+    });
+}
+
+export async function getHadesDomisMovements(user) {
+  requireAdmin(user);
+  const snap = await getDocs(col("ventas"));
+  return snap.docs
+    .map(d => ({ id: d.id, ...d.data() }))
+    .filter(isHadesDomisMovement)
+    .sort((a, b) => Number(b.timestamp || 0) - Number(a.timestamp || 0));
+}
+
+export async function registrarAbonoDomis({ user, monto, metodo, cuenta, liquidacion = false }) {
+  requireAdmin(user);
+  const amount = Math.round(Number(monto) || 0);
+  if (amount <= 0) throw new Error("El monto debe ser mayor que cero.");
+  if (!metodo || !cuenta) throw new Error("Debes indicar medio y cuenta de destino.");
+
+  const auditRef = doc(col("auditoria_hades"));
+  const ventaRef = doc(col("ventas"));
+  const timestamp = Date.now();
+  const payload = {
+    tipoMovimiento: "Abono Domis",
+    fecha: new Date().toISOString().slice(0, 10),
+    cliente: "HADES (LOGÍSTICA)",
+    notas: liquidacion ? "Liquidación total de deuda logística Hades." : "Abono parcial de deuda logística Hades.",
+    productos: [{ concepto: liquidacion ? "Liquidación Deuda Logística" : "Abono Deuda Logística", cantidad: 1, valorUnitario: amount, total: amount }],
+    entrega: { medio: "N/A", encargado: "N/A", costo: 0 },
+    pagos: [{ metodo, cuenta, monto: amount }],
+    totalVenta: amount,
+    creadoPor: ADMIN_EMAIL,
+    creadoPorUid: user.uid,
+    timestamp,
+    horaServidor: serverTimestamp(),
+    auditoriaHadesId: auditRef.id
+  };
+
+  const auditPayload = buildHadesAudit({
+    accion: liquidacion ? "SALDAR_A_CERO" : "ABONO_PARCIAL",
+    operacionId: ventaRef.id,
+    monto: amount,
+    metodo,
+    cuenta,
+    usuarioUid: user.uid,
+    usuarioEmail: ADMIN_EMAIL,
+    fechaCliente: payload.fecha,
+    timestampCliente: timestamp
+  });
+
+  const batch = writeBatch(db);
+  batch.set(ventaRef, payload);
+  batch.set(auditRef, auditPayload);
+  await batch.commit();
+  return { ventaId: ventaRef.id, auditoriaId: auditRef.id, monto: amount };
+}
+
+export async function liquidarDomisHades(user, monto) {
+  requireAdmin(user);
+  return registrarAbonoDomis({ user, monto, metodo: "Liquidación", cuenta: "HADES", liquidacion: true });
 }
